@@ -1,0 +1,27 @@
+# --- Web framework ---
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+
+# --- Database ---
+SQLAlchemy==2.0.36
+alembic==1.14.0
+PyMySQL==1.1.1
+cryptography==44.0.0            # required by PyMySQL for sha2 auth
+
+# --- Validation / settings ---
+pydantic==2.10.3
+pydantic-settings==2.6.1
+email-validator==2.2.0
+
+# --- Security / auth ---
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1                   # pinned: passlib 1.7.4 reads bcrypt.__about__
+PyJWT==2.10.1
+pyotp==2.9.0                    # TOTP 2FA
+
+# --- AI (provider-agnostic; both optional at runtime) ---
+httpx==0.28.1                   # used to call free-tier LLM HTTP APIs
+
+# --- Utilities ---
+python-dateutil==2.9.0.post0

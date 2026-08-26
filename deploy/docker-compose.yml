@@ -1,0 +1,56 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: skac
+      MYSQL_USER: skac
+      MYSQL_PASSWORD: skac
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql+pymysql://skac:skac@db:3306/skac
+      SECRET_KEY: change-me-in-production
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      AI_PROVIDER: none
+    ports:
+      - "8000:8000"
+    # First-run convenience: create tables from models, then serve.
+    # For production migrations generate an initial Alembic revision:
+    #   alembic revision --autogenerate -m "initial"
+    # and switch this command to: alembic upgrade head && uvicorn ...
+    command: >
+      sh -c "python -c 'from app.core.database import Base, engine; import app.models; Base.metadata.create_all(engine)' &&
+      uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+    ports:
+      - "5173:5173"
+
+volumes:
+  db_data:
