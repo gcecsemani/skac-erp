@@ -49,5 +49,6 @@ pnpm-debug.log*
 *.local
 *.pid
 
-# Docker / local data
-deploy/mysql/data/
+# Local uploads (field visit photos)
+backend/uploads/
+uploads/

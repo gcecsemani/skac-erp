@@ -10,6 +10,7 @@ from app.api.v1 import (
     config,
     customers,
     expenses,
+    field_visits,
     inventory,
     products,
     purchasing,
@@ -32,6 +33,7 @@ api_router.include_router(purchasing.router)
 api_router.include_router(transfers.router)
 api_router.include_router(accounting.router)
 api_router.include_router(expenses.router)
+api_router.include_router(field_visits.router)
 api_router.include_router(reports.router)
 api_router.include_router(admin.router)
 api_router.include_router(ai.router)

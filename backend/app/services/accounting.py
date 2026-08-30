@@ -164,6 +164,17 @@ def post_expense(db, *, organization_id, branch_id, entry_date, expense_id, amou
     )
 
 
+def post_purchase_return(db, *, organization_id, branch_id, entry_date, purchase_return_id,
+                         total_value) -> None:
+    post_entry(
+        db, organization_id=organization_id, branch_id=branch_id,
+        entry_date=entry_date, narration="Purchase return (debit note)",
+        ref_type="purchase_return", ref_id=purchase_return_id,
+        lines=[("2000", Decimal(total_value), Decimal("0")),   # Dr Creditors
+               ("1300", Decimal("0"), Decimal(total_value))],  # Cr Inventory
+    )
+
+
 def post_credit_note(db, *, organization_id, branch_id, entry_date, credit_note_id,
                      taxable, tax, total) -> None:
     lines = [("3000", Decimal(taxable), Decimal("0"))]              # Dr Sales (reverse)

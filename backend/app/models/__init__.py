@@ -4,9 +4,11 @@ from app.models.config import ConfigItem
 from app.models.audit import AuditLog
 from app.models.customer import Customer, CustomerPayment
 from app.models.expense import Expense
+from app.models.field_visit import FieldVisit, FieldVisitPhoto
 from app.models.enums import (
     AccountType,
     DocumentStatus,
+    FieldVisitStatus,
     InvoiceStatus,
     MovementType,
     PaymentMode,
@@ -23,6 +25,8 @@ from app.models.purchase import (
     GRNItem,
     PurchaseOrder,
     PurchaseOrderItem,
+    PurchaseReturn,
+    PurchaseReturnItem,
     VendorPayment,
 )
 from app.models.returns import CreditNote, CreditNoteItem
@@ -37,6 +41,8 @@ __all__ = [
     "Customer",
     "CustomerPayment",
     "Expense",
+    "FieldVisit",
+    "FieldVisitPhoto",
     "Batch",
     "Stock",
     "StockMovement",
@@ -57,6 +63,8 @@ __all__ = [
     "PurchaseOrderItem",
     "GRN",
     "GRNItem",
+    "PurchaseReturn",
+    "PurchaseReturnItem",
     "VendorPayment",
     "CreditNote",
     "CreditNoteItem",
@@ -71,4 +79,5 @@ __all__ = [
     "TransferStatus",
     "DocumentStatus",
     "AccountType",
+    "FieldVisitStatus",
 ]

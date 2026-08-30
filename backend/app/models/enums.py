@@ -66,3 +66,9 @@ class AccountType(str, enum.Enum):
     income = "income"
     expense = "expense"
     equity = "equity"
+
+
+class FieldVisitStatus(str, enum.Enum):
+    open = "open"              # logged; waiting for farmer at the shop
+    completed = "completed"    # farmer came and took the order
+    cancelled = "cancelled"    # farmer did not come

@@ -1,4 +1,4 @@
-"""Purchase cycle: vendors, purchase orders, GRN receipt, vendor payments."""
+"""Purchase cycle: vendors, purchase orders, GRN, purchase returns, vendor payments."""
 from __future__ import annotations
 
 from datetime import date
@@ -13,18 +13,21 @@ from app.core import rbac
 from app.core.audit import record_audit
 from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
+from app.models.inventory import Batch, Stock
 from app.models.enums import MovementType, PurchaseOrderStatus
-from app.models.inventory import Batch
 from app.models.product import Product
 from app.models.purchase import (
     GRN,
     GRNItem,
     PurchaseOrder,
     PurchaseOrderItem,
+    PurchaseReturn,
+    PurchaseReturnItem,
     VendorPayment,
 )
 from app.models.vendor import Vendor
 from app.services import accounting, inventory as inv
+from app.services.inventory import InsufficientStock
 
 router = APIRouter(prefix="/purchasing", tags=["purchasing"])
 
@@ -112,6 +115,17 @@ class VendorPaymentIn(BaseModel):
     amount: Decimal = Field(gt=0)
     mode: str = "cash"
     note: str | None = None
+
+
+class PurchaseReturnItemIn(BaseModel):
+    grn_item_id: int
+    quantity: Decimal = Field(gt=0)
+
+
+class PurchaseReturnIn(BaseModel):
+    grn_id: int
+    reason: str = Field(min_length=3, max_length=255)
+    items: list[PurchaseReturnItemIn] = Field(min_length=1)
 
 
 # --- Vendors ---
@@ -231,7 +245,26 @@ def vendor_ledger(
             "credit": float(p.amount),
             "note": p.note or p.mode,
         })
-    entries.sort(key=lambda e: (e["date"] or "", e["ref"] or ""))
+    returns = db.scalars(
+        select(PurchaseReturn).where(
+            PurchaseReturn.organization_id == current.organization_id,
+            PurchaseReturn.vendor_id == vendor_id,
+        ).order_by(PurchaseReturn.note_date.asc(), PurchaseReturn.id.asc())
+    ).all()
+    for r in returns:
+        entries.append({
+            "kind": "return",
+            "date": r.note_date.isoformat(),
+            "ref": r.note_no,
+            "debit": 0,
+            "credit": float(r.total),
+            "note": r.reason,
+        })
+    entries.sort(key=lambda e: (
+        e["date"] or "",
+        {"grn": 0, "return": 1, "payment": 2}.get(e["kind"], 9),
+        e["ref"] or "",
+    ))
     running = 0.0
     for e in entries:
         running += e["debit"] - e["credit"]
@@ -436,6 +469,232 @@ def list_grn(
             "item_count": len(g.items),
         })
     return out
+
+
+def _returned_qty_by_grn_item(db: Session, grn_id: int) -> dict[int, Decimal]:
+    rows = db.execute(
+        select(
+            PurchaseReturnItem.grn_item_id,
+            func.coalesce(func.sum(PurchaseReturnItem.quantity), 0),
+        )
+        .join(PurchaseReturn, PurchaseReturn.id == PurchaseReturnItem.purchase_return_id)
+        .where(PurchaseReturn.grn_id == grn_id)
+        .group_by(PurchaseReturnItem.grn_item_id)
+    ).all()
+    return {int(item_id): Decimal(qty) for item_id, qty in rows}
+
+
+def _serialize_grn(db: Session, g: GRN) -> dict:
+    vendor = db.get(Vendor, g.vendor_id)
+    returned = _returned_qty_by_grn_item(db, g.id)
+    items = []
+    for it in g.items:
+        product = db.get(Product, it.product_id)
+        already = returned.get(it.id, Decimal("0"))
+        remaining = it.quantity - already
+        on_hand = Decimal("0")
+        if it.batch_id:
+            stock = db.scalar(select(Stock).where(
+                Stock.branch_id == g.branch_id, Stock.batch_id == it.batch_id))
+            if stock is not None:
+                on_hand = stock.quantity
+        returnable = remaining if remaining < on_hand else on_hand
+        if returnable < 0:
+            returnable = Decimal("0")
+        items.append({
+            "id": it.id,
+            "product_id": it.product_id,
+            "product_name": product.name if product else str(it.product_id),
+            "batch_id": it.batch_id,
+            "batch_no": it.batch_no,
+            "expiry_date": it.expiry_date.isoformat() if it.expiry_date else None,
+            "quantity": float(it.quantity),
+            "unit_price": float(it.unit_price),
+            "returned_quantity": float(already),
+            "on_hand": float(on_hand),
+            "returnable": float(returnable),
+        })
+    return {
+        "id": g.id, "grn_no": g.grn_no, "branch_id": g.branch_id,
+        "vendor_id": g.vendor_id,
+        "vendor": vendor.name if vendor else None,
+        "received_date": g.received_date.isoformat(),
+        "vendor_invoice_no": g.vendor_invoice_no,
+        "total_value": float(g.total_value),
+        "item_count": len(g.items),
+        "items": items,
+    }
+
+
+@router.get("/grn/{grn_id}")
+def get_grn(
+    grn_id: int,
+    current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db),
+) -> dict:
+    grn = db.get(GRN, grn_id)
+    if grn is None or grn.organization_id != current.organization_id:
+        raise HTTPException(status_code=404, detail="GRN not found")
+    current.assert_branch_access(grn.branch_id)
+    return _serialize_grn(db, grn)
+
+
+def _serialize_purchase_return(db: Session, note: PurchaseReturn) -> dict:
+    vendor = db.get(Vendor, note.vendor_id)
+    grn = db.get(GRN, note.grn_id)
+    return {
+        "id": note.id,
+        "note_no": note.note_no,
+        "note_date": note.note_date.isoformat(),
+        "reason": note.reason,
+        "total": float(note.total),
+        "vendor_id": note.vendor_id,
+        "vendor": vendor.name if vendor else None,
+        "grn_id": note.grn_id,
+        "grn_no": grn.grn_no if grn else None,
+        "branch_id": note.branch_id,
+        "items": [
+            {
+                "grn_item_id": i.grn_item_id,
+                "product_id": i.product_id,
+                "product_name": i.product_name,
+                "batch_no": i.batch_no,
+                "quantity": float(i.quantity),
+                "unit_price": float(i.unit_price),
+                "line_total": float(i.line_total),
+            }
+            for i in note.items
+        ],
+    }
+
+
+@router.get("/returns")
+def list_purchase_returns(
+    search: str | None = None,
+    limit: int = Query(100, ge=1, le=300),
+    current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db),
+) -> list[dict]:
+    stmt = select(PurchaseReturn).where(
+        PurchaseReturn.organization_id == current.organization_id
+    )
+    if not current.sees_all_branches:
+        stmt = stmt.where(PurchaseReturn.branch_id.in_(current.branch_ids or [-1]))
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.join(Vendor, Vendor.id == PurchaseReturn.vendor_id).join(
+            GRN, GRN.id == PurchaseReturn.grn_id
+        ).where(or_(
+            PurchaseReturn.note_no.ilike(like),
+            PurchaseReturn.reason.ilike(like),
+            Vendor.name.ilike(like),
+            GRN.grn_no.ilike(like),
+        ))
+    rows = db.scalars(stmt.order_by(PurchaseReturn.id.desc()).limit(limit)).unique().all()
+    return [_serialize_purchase_return(db, r) for r in rows]
+
+
+@router.post("/returns", status_code=201)
+def create_purchase_return(
+    payload: PurchaseReturnIn,
+    current: CurrentUser = Depends(require_permission(rbac.P_PURCHASE_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict:
+    TWO = Decimal("0.01")
+    grn = db.get(GRN, payload.grn_id)
+    if grn is None or grn.organization_id != current.organization_id:
+        raise HTTPException(status_code=404, detail="GRN not found")
+    current.assert_branch_access(grn.branch_id)
+
+    already = _returned_qty_by_grn_item(db, grn.id)
+    note = PurchaseReturn(
+        organization_id=current.organization_id, branch_id=grn.branch_id,
+        vendor_id=grn.vendor_id, grn_id=grn.id, created_by_user_id=current.id,
+        note_date=date.today(), reason=payload.reason.strip(),
+    )
+    db.add(note)
+    db.flush()
+
+    total = Decimal("0")
+    seen: set[int] = set()
+    for it in payload.items:
+        if it.grn_item_id in seen:
+            raise HTTPException(status_code=400, detail="Duplicate product line on this return")
+        seen.add(it.grn_item_id)
+        line = db.get(GRNItem, it.grn_item_id)
+        if line is None or line.grn_id != grn.id:
+            raise HTTPException(status_code=400, detail="Item is not on this GRN")
+        remaining = line.quantity - already.get(line.id, Decimal("0"))
+        if it.quantity <= 0 or it.quantity > remaining:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Return qty cannot exceed remaining GRN qty ({float(remaining)})",
+            )
+        product = db.get(Product, line.product_id)
+        name = product.name if product else str(line.product_id)
+        if not line.batch_id:
+            raise HTTPException(status_code=400, detail=f"{name} has no batch to return")
+        try:
+            inv.issue_from_batch(
+                db, organization_id=current.organization_id, branch_id=grn.branch_id,
+                product_id=line.product_id, batch_id=line.batch_id, quantity=it.quantity,
+                movement_type=MovementType.purchase_return,
+                ref_type="purchase_return", ref_id=note.id,
+            )
+        except InsufficientStock as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot return {float(it.quantity):g} of {name} "
+                    f"(batch {line.batch_no}). Only {float(exc.available):g} is still "
+                    f"on hand at this branch — the rest has already been sold or transferred."
+                ),
+            )
+        line_total = (it.quantity * line.unit_price).quantize(TWO)
+        note.items.append(PurchaseReturnItem(
+            grn_item_id=line.id, product_id=line.product_id, batch_id=line.batch_id,
+            product_name=name, batch_no=line.batch_no, quantity=it.quantity,
+            unit_price=line.unit_price, line_total=line_total,
+        ))
+        total += line_total
+        if grn.purchase_order_id:
+            po_item = db.scalar(select(PurchaseOrderItem).where(
+                PurchaseOrderItem.order_id == grn.purchase_order_id,
+                PurchaseOrderItem.product_id == line.product_id,
+            ))
+            if po_item:
+                po_item.received_quantity = po_item.received_quantity - it.quantity
+                if po_item.received_quantity < 0:
+                    po_item.received_quantity = Decimal("0")
+
+    note.total = total
+    count = db.scalar(select(func.count(PurchaseReturn.id)).where(
+        PurchaseReturn.organization_id == current.organization_id)) or 0
+    note.note_no = f"DN/{date.today().year}/{count:05d}"
+
+    vendor = db.get(Vendor, grn.vendor_id)
+    if vendor:
+        vendor.outstanding_balance = vendor.outstanding_balance - total
+    accounting.post_purchase_return(
+        db, organization_id=current.organization_id, branch_id=grn.branch_id,
+        entry_date=note.note_date, purchase_return_id=note.id, total_value=total)
+
+    if grn.purchase_order_id:
+        po = db.get(PurchaseOrder, grn.purchase_order_id)
+        if po:
+            fully = all(i.received_quantity >= i.quantity for i in po.items)
+            any_recv = any(i.received_quantity > 0 for i in po.items)
+            if fully:
+                po.status = PurchaseOrderStatus.received
+            elif any_recv:
+                po.status = PurchaseOrderStatus.partially_received
+            else:
+                po.status = PurchaseOrderStatus.placed
+
+    record_audit(db, action="create", entity_type="purchase_return", entity_id=note.id,
+                 actor_user_id=current.id, organization_id=current.organization_id,
+                 branch_id=grn.branch_id, changes={"total": str(total)})
+    db.commit()
+    db.refresh(note)
+    return _serialize_purchase_return(db, note)
 
 
 # --- Vendor payments ---

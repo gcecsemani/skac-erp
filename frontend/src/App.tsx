@@ -3,7 +3,7 @@ import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom"
 import {
   LayoutDashboard, ShoppingCart, ReceiptText, Undo2, Users, Package,
   Boxes, ArrowLeftRight, Truck, Landmark, BarChart3, Sparkles, Brain,
-  ShieldCheck, UserCog, Menu, Leaf, LogOut, Building2, Wallet, Settings2,
+  ShieldCheck, UserCog, Menu, Leaf, LogOut, Building2, Wallet, Settings2, MapPin,
 } from "lucide-react";
 import { useAuth } from "./auth";
 import { canAccessPath, homePath, isOwner } from "./roles";
@@ -25,6 +25,7 @@ import Compliance from "./pages/Compliance";
 import Admin from "./pages/Admin";
 import Branches from "./pages/Branches";
 import Expenses from "./pages/Expenses";
+import FieldVisits from "./pages/FieldVisits";
 import Config from "./pages/Config";
 
 const NAV = [
@@ -35,6 +36,7 @@ const NAV = [
       { to: "/invoices", label: "Invoices", icon: ReceiptText },
       { to: "/returns", label: "Sales Returns", icon: Undo2 },
       { to: "/customers", label: "Farmers", icon: Users },
+      { to: "/field-visits", label: "Field visits", icon: MapPin },
     ],
   },
   {
@@ -70,7 +72,7 @@ const NAV = [
 
 const TITLES: Record<string, string> = {
   "/": "Consolidated Dashboard", "/pos": "POS Billing", "/invoices": "Invoices",
-  "/returns": "Sales Returns", "/customers": "Farmers / Customers", "/products": "Products",
+  "/returns": "Sales Returns", "/customers": "Farmers / Customers", "/field-visits": "Field visits", "/products": "Products",
   "/stock": "Stock on Hand", "/transfers": "Stock Transfers", "/purchasing": "Purchasing",
   "/accounting": "Accounting & Finance", "/expenses": "Expenses", "/reports": "Reports & Analytics",
   "/assistant": "AI Business Assistant", "/purchase-ai": "AI Purchase Recommendations",
@@ -156,6 +158,7 @@ export default function App() {
             <Route path="/invoices" element={<Guard path="/invoices"><Invoices /></Guard>} />
             <Route path="/returns" element={<Guard path="/returns"><Returns /></Guard>} />
             <Route path="/customers" element={<Guard path="/customers"><Customers /></Guard>} />
+            <Route path="/field-visits" element={<Guard path="/field-visits"><FieldVisits /></Guard>} />
             <Route path="/products" element={<Guard path="/products"><Products /></Guard>} />
             <Route path="/stock" element={<Guard path="/stock"><Stock /></Guard>} />
             <Route path="/transfers" element={<Guard path="/transfers"><Transfers /></Guard>} />

@@ -113,9 +113,10 @@ async function request<T>(path: string, options: RequestInit = {}, didRefresh = 
   }
 
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
+  const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (!isForm && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -130,7 +131,10 @@ async function request<T>(path: string, options: RequestInit = {}, didRefresh = 
     const body = await res.json().catch(() => ({}));
     throw new Error(formatApiError(body, res.statusText));
   }
-  return res.status === 204 ? (undefined as T) : res.json();
+  if (res.status === 204) return undefined as T;
+  const ctype = res.headers.get("content-type") || "";
+  if (ctype.includes("application/json")) return res.json();
+  return (await res.blob()) as T;
 }
 
 const get = <T,>(p: string) => request<T>(p);
@@ -224,6 +228,10 @@ export const api = {
   grns: (search?: string) =>
     get<any[]>(`/purchasing/grn${search ? `?search=${encodeURIComponent(search)}` : ""}`),
   createGRN: (g: any) => post("/purchasing/grn", g),
+  grn: (id: number) => get<any>(`/purchasing/grn/${id}`),
+  purchaseReturns: (search?: string) =>
+    get<any[]>(`/purchasing/returns${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+  createPurchaseReturn: (p: any) => post<any>("/purchasing/returns", p),
   vendorPayment: (p: any) => post("/purchasing/payments", p),
   vendorPayments: (vendorId?: number) =>
     get<any[]>(`/purchasing/payments${vendorId ? `?vendor_id=${vendorId}` : ""}`),
@@ -240,9 +248,38 @@ export const api = {
   expenseCategories: () => get<any[]>("/expenses/categories"),
   createExpense: (e: any) => post("/expenses", e),
 
+  // field visits
+  fieldVisits: (opts?: { status?: string; branchId?: number; search?: string }) => {
+    const p = new URLSearchParams();
+    if (opts?.status) p.set("status", opts.status);
+    if (opts?.branchId) p.set("branch_id", String(opts.branchId));
+    if (opts?.search) p.set("search", opts.search);
+    const q = p.toString();
+    return get<any[]>(`/field-visits${q ? `?${q}` : ""}`);
+  },
+  fieldVisit: (id: number) => get<any>(`/field-visits/${id}`),
+  fieldVisitStaff: () => get<any[]>("/field-visits/staff"),
+  createFieldVisit: (v: any) => post<any>("/field-visits", v),
+  uploadVisitPhotos: (id: number, files: File[]) => {
+    const fd = new FormData();
+    files.forEach((f) => fd.append("photos", f));
+    return request<any>(`/field-visits/${id}/photos`, { method: "POST", body: fd });
+  },
+  visitPhotoBlob: (visitId: number, photoId: number) =>
+    request<Blob>(`/field-visits/${visitId}/photos/${photoId}`),
+  deleteVisitPhoto: (visitId: number, photoId: number) =>
+    del<any>(`/field-visits/${visitId}/photos/${photoId}`),
+  deleteVisitPhotos: (visitId: number) =>
+    del<any>(`/field-visits/${visitId}/photos`),
+  completeFieldVisit: (id: number, note?: string) =>
+    post<any>(`/field-visits/${id}/complete`, { note: note || null }),
+  cancelFieldVisit: (id: number, note?: string) =>
+    post<any>(`/field-visits/${id}/cancel`, { note: note || null }),
+
   // transfers
   transfers: () => get<any[]>("/transfers"),
-  createTransfer: (t: any) => post("/transfers", t),
+  transfer: (id: number) => get<any>(`/transfers/${id}`),
+  createTransfer: (t: any) => post<any>("/transfers", t),
   approveTransfer: (id: number) => post(`/transfers/${id}/approve`),
   rejectTransfer: (id: number) => post(`/transfers/${id}/reject`),
 

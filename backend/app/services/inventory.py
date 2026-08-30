@@ -118,6 +118,48 @@ def allocate_fifo(
     return allocations
 
 
+def issue_from_batch(
+    db: Session,
+    *,
+    organization_id: int,
+    branch_id: int,
+    product_id: int,
+    batch_id: int,
+    quantity: Decimal,
+    movement_type: MovementType,
+    ref_type: str | None = None,
+    ref_id: int | None = None,
+) -> None:
+    """Issue a specific batch (purchase returns must go back on the GRN batch)."""
+    stock = db.scalar(
+        select(Stock).where(Stock.branch_id == branch_id, Stock.batch_id == batch_id)
+    )
+    available = stock.quantity if stock is not None else Decimal("0")
+    qty = Decimal(quantity)
+    if qty > available:
+        raise InsufficientStock(product_id, qty, available)
+    batch = db.get(Batch, batch_id)
+    apply_issue(
+        db,
+        organization_id=organization_id,
+        branch_id=branch_id,
+        product_id=product_id,
+        allocations=[
+            Allocation(
+                batch_id=batch_id,
+                batch_no=batch.batch_no if batch else "",
+                mfg_date=batch.mfg_date if batch else None,
+                expiry_date=batch.expiry_date if batch else None,
+                quantity=qty,
+                purchase_price=batch.purchase_price if batch else Decimal("0"),
+            )
+        ],
+        movement_type=movement_type,
+        ref_type=ref_type,
+        ref_id=ref_id,
+    )
+
+
 def apply_issue(
     db: Session,
     *,

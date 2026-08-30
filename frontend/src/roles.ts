@@ -9,6 +9,7 @@ export const CASHIER_PATHS = new Set([
   "/returns",
   "/customers",
   "/expenses",
+  "/field-visits",
 ]);
 
 export function isOwner(user: { role?: string } | null | undefined): boolean {

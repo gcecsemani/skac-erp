@@ -348,3 +348,14 @@ tbody tr:last-child td { border-bottom: none; }
   .grid-4 { grid-template-columns: 1fr; }
   .content { padding: 14px; }
 }
+
+.photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.photo-grid img { width: 100%; height: 140px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); display: block; }
+.photo-tile { position: relative; }
+.photo-del {
+  position: absolute; top: 6px; right: 6px; width: 28px; height: 28px;
+  border: none; border-radius: 8px; background: rgba(15,23,42,.72); color: #fff;
+  display: grid; place-items: center; cursor: pointer;
+}
+.photo-del:hover { background: var(--danger); }
+.map-frame { width: 100%; height: 240px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }

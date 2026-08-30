@@ -2,7 +2,7 @@
 
 Only two roles are used:
 - owner: full access across every branch
-- cashier: POS, invoices, sales returns, farmers, and expenses for assigned branch(es)
+- cashier: POS, invoices, sales returns, farmers, expenses, and field visits for assigned branch(es)
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ ROLE_CASHIER = "cashier"
 
 DEFAULT_ROLES: list[dict] = [
     {"key": ROLE_OWNER, "name": "Owner", "description": "Full access, all branches"},
-    {"key": ROLE_CASHIER, "name": "Cashier", "description": "POS, invoices, returns, farmers and expenses for assigned branch"},
+    {"key": ROLE_CASHIER, "name": "Cashier", "description": "POS, invoices, returns, farmers, expenses and field visits for assigned branch"},
 ]
 
 ALLOWED_ROLE_KEYS = {ROLE_OWNER, ROLE_CASHIER}
@@ -33,12 +33,13 @@ P_REPORT_VIEW = "report:view"
 P_AI_USE = "ai:use"
 P_AUDIT_VIEW = "audit:view"
 P_CONFIG_MANAGE = "config:manage"
+P_FIELD_VISIT = "field_visit:manage"
 
 _ALL = {
     P_BRANCH_MANAGE, P_USER_MANAGE, P_PRODUCT_MANAGE, P_PRODUCT_EDIT_PRICE,
     P_INVENTORY_MANAGE, P_CUSTOMER_MANAGE, P_SALE_CREATE, P_SALE_CANCEL,
     P_PURCHASE_MANAGE, P_ACCOUNTING_VIEW, P_ACCOUNTING_MANAGE, P_EXPENSE_MANAGE,
-    P_REPORT_VIEW, P_AI_USE, P_AUDIT_VIEW, P_CONFIG_MANAGE,
+    P_REPORT_VIEW, P_AI_USE, P_AUDIT_VIEW, P_CONFIG_MANAGE, P_FIELD_VISIT,
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -48,6 +49,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         P_SALE_CANCEL,
         P_CUSTOMER_MANAGE,
         P_EXPENSE_MANAGE,
+        P_FIELD_VISIT,
     },
 }
 
