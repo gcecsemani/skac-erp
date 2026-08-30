@@ -3,6 +3,8 @@ const BASE_URL =
   (import.meta as any).env?.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1";
 
 const TOKEN_KEY = "skac_token";
+const REFRESH_KEY = "skac_refresh";
+export const AUTH_EXPIRED_EVENT = "skac:auth-expired";
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -10,8 +12,70 @@ export function getToken(): string | null {
 export function setToken(token: string) {
   localStorage.setItem(TOKEN_KEY, token);
 }
+export function getRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_KEY);
+}
+export function setRefreshToken(token: string) {
+  localStorage.setItem(REFRESH_KEY, token);
+}
+export function setSession(access: string, refresh?: string) {
+  setToken(access);
+  if (refresh) setRefreshToken(refresh);
+}
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+}
+
+function tokenExpiresSoon(token: string, skewMs = 60_000): boolean {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return true;
+    const padded = part.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (part.length % 4)) % 4);
+    const payload = JSON.parse(atob(padded));
+    if (typeof payload.exp !== "number") return false;
+    return payload.exp * 1000 < Date.now() + skewMs;
+  } catch {
+    return true;
+  }
+}
+
+function skipRefresh(path: string): boolean {
+  return path.startsWith("/auth/login") || path.startsWith("/auth/refresh");
+}
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const refresh = getRefreshToken();
+    if (!refresh) return false;
+    try {
+      const res = await fetch(`${BASE_URL}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refresh }),
+      });
+      if (!res.ok) return false;
+      const body = await res.json();
+      if (!body?.access_token) return false;
+      setSession(body.access_token, body.refresh_token);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
+function expireSession() {
+  clearToken();
+  window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
 }
 
 function formatApiError(body: any, fallback: string): string {
@@ -36,7 +100,18 @@ function formatApiError(body: any, fallback: string): string {
   return fallback || "Something went wrong. Please try again.";
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, didRefresh = false): Promise<T> {
+  if (!didRefresh && !skipRefresh(path)) {
+    const token = getToken();
+    if ((token && tokenExpiresSoon(token)) || (!token && getRefreshToken())) {
+      const ok = await tryRefresh();
+      if (!ok && !token) {
+        expireSession();
+        throw new Error("Your session expired. Please sign in again.");
+      }
+    }
+  }
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
@@ -45,6 +120,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+  if (res.status === 401 && !didRefresh && !skipRefresh(path)) {
+    const ok = await tryRefresh();
+    if (ok) return request<T>(path, options, true);
+    expireSession();
+    throw new Error("Your session expired. Please sign in again.");
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(formatApiError(body, res.statusText));
@@ -122,6 +203,8 @@ export const api = {
     return get<any[]>(`/sales/invoices${q ? `?${q}` : ""}`);
   },
   invoice: (id: number) => get<any>(`/sales/invoices/${id}`),
+  findInvoices: (q?: string) =>
+    get<any[]>(`/sales/invoices/find${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   syncInvoices: (invoices: any[]) => post<any[]>("/sales/sync", { invoices }),
 
   // returns

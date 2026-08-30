@@ -161,6 +161,36 @@ def list_invoices(
     return [_invoice_out(inv) for inv in db.scalars(stmt).unique().all()]
 
 
+@router.get("/invoices/find", response_model=list[InvoiceOut])
+def find_invoices(
+    q: str = Query(""),
+    limit: int = Query(12, ge=1, le=50),
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[InvoiceOut]:
+    """Lookup by printed invoice no (AVL/2026-27/00003), numeric id, or farmer name. Not date-filtered."""
+    needle = q.strip()
+    stmt = (
+        select(Invoice)
+        .options(*_invoice_load())
+        .outerjoin(Customer, Invoice.customer_id == Customer.id)
+        .where(Invoice.organization_id == current.organization_id)
+    )
+    if needle:
+        like = f"%{needle}%"
+        conds = [
+            Invoice.invoice_no.ilike(like),
+            Customer.name.ilike(like),
+        ]
+        if needle.isdigit():
+            conds.append(Invoice.id == int(needle))
+        stmt = stmt.where(or_(*conds))
+    if not current.sees_all_branches:
+        stmt = stmt.where(Invoice.branch_id.in_(current.branch_ids or [-1]))
+    stmt = stmt.order_by(Invoice.id.desc()).limit(limit)
+    return [_invoice_out(inv) for inv in db.scalars(stmt).unique().all()]
+
+
 @router.get("/invoices/{invoice_id}", response_model=InvoiceOut)
 def get_invoice(
     invoice_id: int,

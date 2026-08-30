@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { api, clearToken, getToken, setToken } from "./api";
+import { api, AUTH_EXPIRED_EVENT, clearToken, getRefreshToken, getToken, setSession } from "./api";
 
 interface AuthState {
   user: any | null;
@@ -15,8 +15,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const onExpired = () => setUser(null);
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  useEffect(() => {
     (async () => {
-      if (getToken()) {
+      if (getToken() || getRefreshToken()) {
         try {
           setUser(await api.me());
         } catch {
@@ -29,7 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string, totp?: string) => {
     const res = await api.login(email, password, totp);
-    setToken(res.access_token);
+    setSession(res.access_token, res.refresh_token);
     setUser(await api.me());
   };
 

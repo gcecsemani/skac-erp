@@ -2,14 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { Plus, Undo2 } from "lucide-react";
 import { api } from "../api";
 import { inr, matchesQuery } from "../format";
-import { Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, Table } from "../components/ui";
+import { Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
 import * as V from "../validate";
 
 export default function Returns() {
   const [rows, setRows] = useState<any[] | null>(null);
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
-  const [invoiceId, setInvoiceId] = useState("");
+  const [invoiceId, setInvoiceId] = useState<number | "">("");
+  const [invoiceHits, setInvoiceHits] = useState<any[]>([]);
   const [invoice, setInvoice] = useState<any>(null);
   const [qty, setQty] = useState<Record<number, number>>({});
   const [reason, setReason] = useState("");
@@ -19,18 +20,33 @@ export default function Returns() {
   useEffect(() => { load(); }, []);
 
   const filtered = useMemo(
-    () => (rows || []).filter((r) => matchesQuery(q, r.note_no, r.date, r.invoice_id, r.reason, r.total)),
+    () => (rows || []).filter((r) => matchesQuery(q, r.note_no, r.date, r.invoice_id, r.invoice_no, r.reason, r.total)),
     [rows, q],
   );
 
-  const fetchInvoice = async () => {
-    setErr(""); setInvoice(null);
-    if (!invoiceId || Number(invoiceId) <= 0) { setErr("Enter a valid invoice ID."); return; }
-    try { setInvoice(await api.invoice(Number(invoiceId))); } catch (e: any) { setErr(e.message); }
+  const searchInvoices = (needle: string) => {
+    api.findInvoices(needle.trim()).then(setInvoiceHits).catch(() => setInvoiceHits([]));
   };
+
+  const pickInvoice = (id: number | "") => {
+    setErr("");
+    setInvoiceId(id);
+    setQty({});
+    if (!id) { setInvoice(null); return; }
+    const hit = invoiceHits.find((inv) => inv.id === id);
+    if (hit) { setInvoice(hit); return; }
+    api.invoice(Number(id)).then((inv) => setInvoice(inv)).catch((e: any) => {
+      setErr(e.message); setInvoice(null);
+    });
+  };
+
+  useEffect(() => {
+    if (open) searchInvoices("");
+  }, [open]);
 
   const submit = async () => {
     setErr("");
+    if (!invoice?.id) { setErr("Select an invoice."); return; }
     const items = Object.entries(qty).filter(([, qv]) => qv > 0).map(([pid, qv]) => ({ product_id: Number(pid), quantity: qv }));
     if (items.length === 0) { setErr("Select at least one item to return."); return; }
     const over = (invoice?.items || []).find((it: any) => (qty[it.product_id] || 0) > Number(it.quantity));
@@ -38,8 +54,8 @@ export default function Returns() {
     const msg = V.minLen(reason, "Reason", 3);
     if (msg) { setErr(msg); return; }
     try {
-      await api.createCreditNote({ invoice_id: Number(invoiceId), reason, items });
-      setOpen(false); setInvoice(null); setQty({}); setInvoiceId(""); setReason(""); load();
+      await api.createCreditNote({ invoice_id: invoice.id, reason, items });
+      setOpen(false); setInvoice(null); setQty({}); setInvoiceId(""); setReason(""); setInvoiceHits([]); load();
     } catch (e: any) { setErr(e.message); }
   };
 
@@ -54,10 +70,10 @@ export default function Returns() {
           <div className="row">
             <ExportButtons title="Sales returns" columns={[
               { key: "note_no", label: "Credit Note #" }, { key: "date", label: "Date" },
-              { key: "invoice_id", label: "Invoice ID" }, { key: "reason", label: "Reason" },
+              { key: "invoice_no", label: "Invoice #" }, { key: "reason", label: "Reason" },
               { key: "total", label: "Amount", num: true, money: true },
             ]} rows={filtered} />
-            <button className="btn btn-primary" onClick={() => setOpen(true)}><Plus size={16} /> New Credit Note</button>
+            <button className="btn btn-primary" onClick={() => { setOpen(true); setErr(""); setInvoice(null); setInvoiceId(""); setQty({}); setReason(""); }}><Plus size={16} /> New Credit Note</button>
           </div>
         }
       />
@@ -69,7 +85,7 @@ export default function Returns() {
           columns={[
             { key: "note_no", label: "Credit Note #" },
             { key: "date", label: "Date" },
-            { key: "invoice_id", label: "Invoice ID" },
+            { key: "invoice_no", label: "Invoice #", render: (r: any) => r.invoice_no || `#${r.invoice_id}` },
             { key: "reason", label: "Reason" },
             { key: "total", label: "Amount", num: true, render: (r) => <strong>{inr(r.total)}</strong> },
           ]}
@@ -87,11 +103,23 @@ export default function Returns() {
             <button className="btn btn-primary" onClick={submit} disabled={!invoice}><Undo2 size={16} /> Issue Credit Note</button>
           </>}
         >
-          <div className="row" style={{ alignItems: "flex-end" }}>
-            <div style={{ flex: 1 }}><Field label="Invoice ID"><input value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} placeholder="e.g. 1" /></Field></div>
-            <button className="btn btn-ghost" style={{ marginBottom: 14 }} onClick={fetchInvoice}>Load</button>
-          </div>
+          <Field label="Invoice #">
+            <SearchSelect
+              value={invoiceId}
+              options={invoiceHits}
+              placeholder="Type AVL/2026-27/00003 or farmer name"
+              onChange={pickInvoice}
+              onQuery={searchInvoices}
+              getLabel={(inv) => `${inv.invoice_no} · ${inv.customer_name || "Walk-in"} · ${inr(inv.grand_total)}`}
+            />
+          </Field>
           {err && <div className="error">{err}</div>}
+          {invoice && (
+            <p className="muted" style={{ marginTop: -8 }}>
+              {invoice.invoice_date} · {invoice.payment_mode} · {inr(invoice.grand_total)}
+              {invoice.payment_mode !== "cash" ? " · Credit bill — return posts a credit note against this invoice" : ""}
+            </p>
+          )}
           {invoice && (
             <>
               <Field label="Reason" required><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Damaged / expired / wrong item" /></Field>

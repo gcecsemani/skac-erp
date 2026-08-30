@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -30,12 +30,48 @@ router = APIRouter(prefix="/purchasing", tags=["purchasing"])
 
 
 # --- Schemas ---
+def _normalize_vendor_phone(value: str | None) -> str | None:
+    """Accept Indian mobile (6–9…) and Tamil Nadu / India landline numbers."""
+    if not value or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if digits.startswith("91") and len(digits) >= 12:
+        digits = digits[2:]
+
+    def is_mobile(n: str) -> bool:
+        return len(n) == 10 and n[:1] in "6789"
+
+    if is_mobile(digits) or (len(digits) == 11 and digits.startswith("0") and is_mobile(digits[1:])):
+        return raw
+    if len(digits) in (10, 11) and digits.startswith("0") and len(digits) > 1 and digits[1] in "2345678":
+        return raw
+    if len(digits) == 10 and digits[:1] in "2345":
+        return raw
+    if 6 <= len(digits) <= 8 and digits[:1] in "2345678":
+        return raw
+    raise ValueError("Enter a valid Indian mobile or landline number")
+
+
 class VendorIn(BaseModel):
-    name: str = Field(min_length=2, max_length=200)
+    name: str = Field(min_length=1, max_length=200)
     gstin: str | None = None
     phone: str | None = None
     email: str | None = None
     address: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _vendor_name(cls, v: str) -> str:
+        v = (v or "").strip()
+        if len(v) < 2:
+            raise ValueError("Vendor name must be at least 2 characters")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def _vendor_phone(cls, v: str | None) -> str | None:
+        return _normalize_vendor_phone(v)
 
 
 class POItemIn(BaseModel):
@@ -397,6 +433,7 @@ def list_grn(
             "vendor": vendor.name if vendor else None,
             "received_date": g.received_date.isoformat(),
             "vendor_invoice_no": g.vendor_invoice_no, "total_value": float(g.total_value),
+            "item_count": len(g.items),
         })
     return out
 

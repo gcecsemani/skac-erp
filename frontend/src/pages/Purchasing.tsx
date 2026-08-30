@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Truck, FileText, PackageCheck, IndianRupee, Pencil, Trash2, Search, BookOpen } from "lucide-react";
 import { api } from "../api";
 import { inr } from "../format";
@@ -6,6 +6,12 @@ import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchSe
 import { PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
 import * as V from "../validate";
+
+function newLine(kind: "po" | "grn") {
+  const line: any = { key: `${Date.now()}-${Math.random()}`, product_id: "", quantity: "", unit_price: "" };
+  if (kind === "grn") { line.batch_no = ""; line.expiry_date = ""; }
+  return line;
+}
 
 export default function Purchasing() {
   const { bundle } = useConfigBundle();
@@ -25,6 +31,8 @@ export default function Purchasing() {
   const [orderQ, setOrderQ] = useState("");
   const [grnQ, setGrnQ] = useState("");
   const [ledger, setLedger] = useState<any | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const loadAll = async (vq?: string, oq?: string, gq?: string) => {
     const [v, o, g] = await Promise.all([
@@ -48,11 +56,31 @@ export default function Purchasing() {
 
   const openModal = (m: string) => {
     setEditId(null);
-    setForm({ branch_id: branches[0]?.id, vendor_id: vendors[0]?.id });
+    const kind = m === "grn" ? "grn" : "po";
+    setForm({
+      branch_id: branches[0]?.id,
+      vendor_id: vendors[0]?.id,
+      vendor_invoice_no: "",
+      lines: m === "po" || m === "grn" ? [newLine(kind)] : undefined,
+    });
     setErr("");
     setModal(m);
     setPickerVendors(vendors);
     api.products(undefined, undefined, 80).then(setPickerProducts).catch(() => setPickerProducts([]));
+  };
+
+  const setLine = (index: number, patch: any) => {
+    setForm((f: any) => ({
+      ...f,
+      lines: (f.lines || []).map((ln: any, i: number) => (i === index ? { ...ln, ...patch } : ln)),
+    }));
+  };
+  const addLine = () => {
+    const kind = modal === "grn" ? "grn" : "po";
+    setForm((f: any) => ({ ...f, lines: [...(f.lines || []), newLine(kind)] }));
+  };
+  const removeLine = (index: number) => {
+    setForm((f: any) => ({ ...f, lines: (f.lines || []).filter((_: any, i: number) => i !== index) }));
   };
   const openEditVendor = (v: any) => { setEditId(v.id); setForm({ name: v.name, gstin: v.gstin, phone: v.phone }); setErr(""); setModal("vendor"); };
   const removeVendor = async (v: any) => {
@@ -64,43 +92,59 @@ export default function Purchasing() {
   };
 
   const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setErr("");
     const msg =
-      modal === "vendor" ? V.firstError(V.minLen(form.name, "Vendor name", 2), V.gstin(form.gstin), V.phone(form.phone))
-      : modal === "po" ? V.firstError(
-          form.branch_id ? null : "Select a branch.",
-          form.vendor_id ? null : "Select a vendor.",
-          form.product_id ? null : "Select a product.",
-          V.positive(form.quantity, "Quantity"),
-          V.nonNegative(form.unit_price || 0, "Unit price"),
+      modal === "vendor" ? V.firstError(
+          V.businessName(form.name, "Vendor name"),
+          V.gstin(form.gstin),
+          V.phone(form.phone, { allowLandline: true }),
         )
-      : modal === "grn" ? V.firstError(
+      : modal === "po" || modal === "grn" ? V.firstError(
           form.branch_id ? null : "Select a branch.",
           form.vendor_id ? null : "Select a vendor.",
-          form.product_id ? null : "Select a product.",
-          V.required(form.batch_no, "Batch number"),
-          V.positive(form.quantity, "Quantity"),
+          (form.lines || []).length ? null : "Add at least one product.",
+          ...(form.lines || []).flatMap((ln: any, i: number) => {
+            const n = i + 1;
+            return [
+              ln.product_id ? null : `Line ${n}: select a product.`,
+              V.positive(ln.quantity, `Line ${n} quantity`),
+              V.nonNegative(ln.unit_price || 0, `Line ${n} unit price`),
+              modal === "grn" ? V.required(ln.batch_no, `Line ${n} batch number`) : null,
+            ];
+          }),
         )
       : modal === "pay" ? V.firstError(
           form.vendor_id ? null : "Select a vendor.",
           V.positive(form.amount, "Amount"),
         )
       : null;
-    if (msg) { setErr(msg); return; }
+    if (msg) { savingRef.current = false; setErr(msg); return; }
+    setSaving(true);
     try {
-      if (modal === "vendor" && editId) await api.updateVendor(editId, { name: form.name, gstin: form.gstin, phone: form.phone });
-      else if (modal === "vendor") await api.createVendor({ name: form.name, gstin: form.gstin, phone: form.phone });
-      if (modal === "po") {
-        if (!form.vendor_id || !form.product_id) { setErr("Select a vendor and a product."); return; }
-        await api.createPO({ branch_id: Number(form.branch_id), vendor_id: Number(form.vendor_id), items: [{ product_id: Number(form.product_id), quantity: Number(form.quantity), unit_price: Number(form.unit_price || 0) }] });
-      }
-      if (modal === "grn") {
-        if (!form.vendor_id || !form.product_id) { setErr("Select a vendor and a product."); return; }
-        await api.createGRN({ branch_id: Number(form.branch_id), vendor_id: Number(form.vendor_id), vendor_invoice_no: form.vendor_invoice_no, items: [{ product_id: Number(form.product_id), batch_no: form.batch_no, quantity: Number(form.quantity), unit_price: Number(form.unit_price || 0), expiry_date: form.expiry_date || null }] });
-      }
-      if (modal === "pay") await api.vendorPayment({ vendor_id: Number(form.vendor_id), branch_id: Number(form.branch_id), amount: Number(form.amount), mode: form.mode || "cash" });
+      if (modal === "vendor" && editId) await api.updateVendor(editId, { name: form.name.trim(), gstin: form.gstin, phone: form.phone });
+      else if (modal === "vendor") await api.createVendor({ name: form.name.trim(), gstin: form.gstin, phone: form.phone });
+      else if (modal === "po") {
+        await api.createPO({
+          branch_id: Number(form.branch_id), vendor_id: Number(form.vendor_id),
+          items: form.lines.map((ln: any) => ({
+            product_id: Number(ln.product_id), quantity: Number(ln.quantity), unit_price: Number(ln.unit_price || 0),
+          })),
+        });
+      } else if (modal === "grn") {
+        await api.createGRN({
+          branch_id: Number(form.branch_id), vendor_id: Number(form.vendor_id),
+          vendor_invoice_no: form.vendor_invoice_no,
+          items: form.lines.map((ln: any) => ({
+            product_id: Number(ln.product_id), batch_no: ln.batch_no, quantity: Number(ln.quantity),
+            unit_price: Number(ln.unit_price || 0), expiry_date: ln.expiry_date || null,
+          })),
+        });
+      } else if (modal === "pay") await api.vendorPayment({ vendor_id: Number(form.vendor_id), branch_id: Number(form.branch_id), amount: Number(form.amount), mode: form.mode || "cash" });
       setModal(null); await loadAll();
     } catch (e: any) { setErr(e.message); }
+    finally { savingRef.current = false; setSaving(false); }
   };
 
   if (!ready) return <Loading />;
@@ -158,6 +202,7 @@ export default function Purchasing() {
           <Table
             columns={[
               { key: "po_no", label: "PO #" }, { key: "vendor", label: "Vendor" }, { key: "order_date", label: "Date" },
+              { key: "items", label: "Items", render: (r) => r.items?.length || 0 },
               { key: "status", label: "Status", render: (r) => <Badge tone={r.status === "received" ? "success" : "info"}>{r.status.replace("_", " ")}</Badge> },
               { key: "expected_total", label: "Value", num: true, render: (r) => inr(r.expected_total) },
             ]}
@@ -178,6 +223,7 @@ export default function Purchasing() {
               { key: "grn_no", label: "GRN #" },
               { key: "vendor", label: "Vendor", render: (r) => r.vendor || "—" },
               { key: "received_date", label: "Date" },
+              { key: "item_count", label: "Items" },
               { key: "vendor_invoice_no", label: "Vendor Inv#" },
               { key: "total_value", label: "Value", num: true, render: (r) => inr(r.total_value) },
             ]}
@@ -190,14 +236,15 @@ export default function Purchasing() {
         <Modal
           title={{ vendor: editId ? "Edit Vendor" : "Add Vendor", po: "New Purchase Order", grn: "Goods Receipt (GRN)", pay: "Record Vendor Payment" }[modal]!}
           onClose={() => setModal(null)}
-          footer={<><button className="btn btn-ghost" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" onClick={save}>Save</button></>}
+          wide={modal === "po" || modal === "grn"}
+          footer={<><button type="button" className="btn btn-ghost" onClick={() => setModal(null)} disabled={saving}>Cancel</button><button type="button" className="btn btn-primary" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</button></>}
         >
           {err && <div className="error">{err}</div>}
           {modal === "vendor" && (
             <div className="grid grid-2">
-              <Field label="Name" required><input value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+              <Field label="Name" required><input value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Ram & Co" /></Field>
               <Field label="GSTIN"><input value={form.gstin || ""} onChange={(e) => setForm({ ...form, gstin: e.target.value })} /></Field>
-              <Field label="Phone"><input value={form.phone || ""} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+              <Field label="Phone"><input value={form.phone || ""} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="Mobile or landline" inputMode="tel" /></Field>
             </div>
           )}
           {(modal === "po" || modal === "grn" || modal === "pay") && (
@@ -216,24 +263,49 @@ export default function Purchasing() {
             </div>
           )}
           {(modal === "po" || modal === "grn") && (
-            <div className="grid grid-2">
-              <Field label="Product">
-                <SearchSelect
-                  value={form.product_id}
-                  options={pickerProducts}
-                  placeholder="Type product name / SKU…"
-                  onChange={(id) => setForm({ ...form, product_id: id })}
-                  onQuery={searchProducts}
-                  getLabel={(p) => `${p.name}${p.sku ? ` · ${p.sku}` : ""}`}
-                />
-              </Field>
-              <Field label="Quantity"><input type="number" onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></Field>
-              <Field label="Unit price"><input type="number" onChange={(e) => setForm({ ...form, unit_price: e.target.value })} /></Field>
-              {modal === "grn" && <>
-                <Field label="Batch no"><input onChange={(e) => setForm({ ...form, batch_no: e.target.value })} /></Field>
-                <Field label="Expiry date"><input type="date" onChange={(e) => setForm({ ...form, expiry_date: e.target.value })} /></Field>
-                <Field label="Vendor invoice #"><input onChange={(e) => setForm({ ...form, vendor_invoice_no: e.target.value })} /></Field>
-              </>}
+            <div>
+              {modal === "grn" && (
+                <div className="grid grid-2" style={{ marginBottom: 12 }}>
+                  <Field label="Vendor invoice #"><input value={form.vendor_invoice_no || ""} onChange={(e) => setForm({ ...form, vendor_invoice_no: e.target.value })} /></Field>
+                </div>
+              )}
+              <div className="row" style={{ justifyContent: "space-between", margin: "4px 0 8px" }}>
+                <strong style={{ fontSize: 13 }}>Products</strong>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={addLine}><Plus size={14} /> Add product</button>
+              </div>
+              {(form.lines || []).map((ln: any, i: number) => (
+                <div key={ln.key} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 12, marginBottom: 10 }}>
+                  <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+                    <span className="muted">Line {i + 1}</span>
+                    {(form.lines || []).length > 1 && (
+                      <button type="button" className="icon-btn" style={{ width: 30, height: 30 }} title="Remove line" onClick={() => removeLine(i)}>
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-2">
+                    <Field label="Product" required>
+                      <SearchSelect
+                        value={ln.product_id}
+                        options={pickerProducts}
+                        placeholder="Type product name / SKU…"
+                        onChange={(id) => setLine(i, { product_id: id })}
+                        onQuery={searchProducts}
+                        getLabel={(p) => `${p.name}${p.sku ? ` · ${p.sku}` : ""}`}
+                      />
+                    </Field>
+                    <Field label="Quantity" required><input type="number" value={ln.quantity} onChange={(e) => setLine(i, { quantity: e.target.value })} /></Field>
+                    <Field label="Unit price"><input type="number" value={ln.unit_price} onChange={(e) => setLine(i, { unit_price: e.target.value })} /></Field>
+                    {modal === "grn" && <>
+                      <Field label="Batch no" required><input value={ln.batch_no} onChange={(e) => setLine(i, { batch_no: e.target.value })} /></Field>
+                      <Field label="Expiry date"><input type="date" value={ln.expiry_date} onChange={(e) => setLine(i, { expiry_date: e.target.value })} /></Field>
+                    </>}
+                  </div>
+                </div>
+              ))}
+              <p className="muted" style={{ margin: "4px 0 0", textAlign: "right" }}>
+                Total {inr((form.lines || []).reduce((s: number, ln: any) => s + Number(ln.quantity || 0) * Number(ln.unit_price || 0), 0))}
+              </p>
             </div>
           )}
           {modal === "pay" && (

@@ -45,10 +45,17 @@ def list_credit_notes(
     ).order_by(CreditNote.id.desc())
     if not current.sees_all_branches:
         stmt = stmt.where(CreditNote.branch_id.in_(current.branch_ids or [-1]))
+    notes = db.scalars(stmt).all()
+    invoice_ids = [c.invoice_id for c in notes]
+    invoice_nos: dict[int, str] = {}
+    if invoice_ids:
+        rows = db.execute(select(Invoice.id, Invoice.invoice_no).where(Invoice.id.in_(invoice_ids))).all()
+        invoice_nos = {row.id: row.invoice_no for row in rows}
     return [
         {"id": c.id, "note_no": c.note_no, "invoice_id": c.invoice_id,
+         "invoice_no": invoice_nos.get(c.invoice_id),
          "date": c.note_date.isoformat(), "reason": c.reason, "total": float(c.total)}
-        for c in db.scalars(stmt).all()
+        for c in notes
     ]
 
 

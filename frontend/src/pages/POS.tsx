@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Trash2, Wifi, WifiOff, RefreshCw, CreditCard, CheckCircle2, User, X, UserPlus, Star, Printer } from "lucide-react";
 import { api } from "../api";
 import { CATEGORY_COLORS, inr } from "../format";
@@ -42,13 +42,21 @@ export default function POS() {
   const [amountPaid, setAmountPaid] = useState("0");
   const [lastInv, setLastInv] = useState<any | null>(null);
   const [openPrint, setOpenPrint] = useState(getOpenPrintDialog);
+  const branchIdRef = useRef(0);
+  const loadSeq = useRef(0);
+  branchIdRef.current = branchId;
 
-  const loadProducts = async (bid = branchId) => {
+  const loadProducts = async (bid?: number) => {
+    const id = bid || branchIdRef.current;
+    if (!id) return;
+    const seq = ++loadSeq.current;
     try {
-      const p = await api.products(undefined, undefined, undefined, bid || undefined);
+      const p = await api.products(undefined, undefined, undefined, id);
+      if (seq !== loadSeq.current) return;
       setProducts(p);
-      cacheProducts(p);
+      cacheProducts(p).catch(() => {});
     } catch {
+      if (seq !== loadSeq.current) return;
       setProducts(await getCachedProducts());
     }
   };
@@ -113,17 +121,21 @@ export default function POS() {
     setMsg({ text: "Product list refreshed.", ok: true });
   };
 
-  const stockOf = (p: any) => Number(p.stock_qty ?? 0);
+  const stockOf = (p: any): number | null => {
+    if (p?.stock_qty == null || p.stock_qty === "") return null;
+    const n = Number(p.stock_qty);
+    return Number.isFinite(n) ? n : null;
+  };
   const unitOf = (p: any) => p.base_unit || "units";
 
   const add = (p: any) => {
     const stock = stockOf(p);
     const inCart = lines.find((l) => l.product_id === p.id)?.quantity || 0;
-    if (stock <= 0) {
+    if (stock != null && stock <= 0) {
       setMsg({ text: `${p.name} is out of stock at this branch. Receive stock before billing it.`, ok: false });
       return;
     }
-    if (inCart + 1 > stock) {
+    if (stock != null && inCart + 1 > stock) {
       setMsg({ text: `Only ${stock} ${unitOf(p)} of ${p.name} left. You already have ${inCart} on this bill.`, ok: false });
       return;
     }
@@ -137,9 +149,9 @@ export default function POS() {
   const setQty = (id: number, q: number) => setLines((cur) => cur.map((l) => {
     if (l.product_id !== id) return l;
     const p = products.find((x) => x.id === id);
-    const stock = p ? stockOf(p) : Infinity;
+    const stock = p ? stockOf(p) : null;
     const next = Math.max(1, q);
-    if (next > stock) {
+    if (stock != null && next > stock) {
       setMsg({ text: `Only ${stock} ${p ? unitOf(p) : "units"} of ${l.name} available at this branch.`, ok: false });
       return { ...l, quantity: Math.max(1, stock) };
     }
@@ -271,7 +283,12 @@ export default function POS() {
         setMsg({ text: "Saved offline — will sync when back online.", ok: true });
       }
       setLines([]); selectCustomer(null); setBillDiscount(""); setDiscMode("inr"); setPayment("cash");
-      loadProducts();
+      setProducts((cur) => cur.map((p) => {
+        const sold = payload.lines.find((l) => l.product_id === p.id);
+        if (!sold || p.stock_qty == null) return p;
+        return { ...p, stock_qty: Math.max(0, Number(p.stock_qty) - Number(sold.quantity)) };
+      }));
+      loadProducts(branchId);
     } catch (e: any) { setMsg({ text: e.message, ok: false }); }
   };
 
@@ -308,7 +325,8 @@ export default function POS() {
           <div className="product-grid">
             {filtered.map((p) => {
               const stock = stockOf(p);
-              const out = stock <= 0;
+              const out = stock != null && stock <= 0;
+              const low = stock != null && stock > 0 && stock <= Number(p.reorder_level || 0);
               return (
               <div key={p.id} className="product-tile-wrap">
                 <button type="button" className={`fav-star ${p.is_favorite ? "on" : ""}`} title={p.is_favorite ? "Unpin favorite" : "Pin as favorite"}
@@ -319,8 +337,8 @@ export default function POS() {
                   <span className="cat-dot" style={{ background: CATEGORY_COLORS[p.category] || "#64748b" }} />
                   <span className="p-name">{p.name}</span>
                   <span className="p-price">{inr(p.sale_price)}</span>
-                  <span className={`p-stock ${out ? "out" : stock <= Number(p.reorder_level || 0) ? "low" : "ok"}`}>
-                    {out ? "Out of stock" : `Stock: ${stock} ${p.base_unit || ""}`}
+                  <span className={`p-stock ${out ? "out" : low ? "low" : "ok"}`}>
+                    {out ? "Out of stock" : stock == null ? "Stock: —" : `Stock: ${stock} ${p.base_unit || ""}`}
                   </span>
                   <span className="muted" style={{ fontSize: 11, textTransform: "capitalize" }}>{p.category} · {p.gst_rate}% GST</span>
                 </button>

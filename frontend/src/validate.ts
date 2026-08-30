@@ -12,12 +12,25 @@ export function email(v: string): string | null {
   return null;
 }
 
-export function phone(v: string | null | undefined, opts?: { required?: boolean }): string | null {
+/** India mobile (6–9…) and Tamil Nadu / India landline (STD 0-2…/0-4… or local 6–8 digits). */
+export function phone(v: string | null | undefined, opts?: { required?: boolean; allowLandline?: boolean }): string | null {
   const s = (v || "").trim();
   if (!s) return opts?.required ? "Phone number is required." : null;
-  const digits = s.replace(/\D/g, "");
-  if (digits.length !== 10) return "Enter a 10-digit mobile number.";
-  return null;
+  let d = s.replace(/\D/g, "");
+  if (d.startsWith("91") && d.length >= 12) d = d.slice(2);
+  const mobile = (n: string) => n.length === 10 && /^[6-9]/.test(n);
+  if (mobile(d)) return null;
+  if (d.length === 11 && d.startsWith("0") && mobile(d.slice(1))) return null;
+  if (opts?.allowLandline) {
+    // 0 + STD (2–4 digits, typically 2–8) + subscriber; total 10–11 digits.
+    if ((d.length === 10 || d.length === 11) && d.startsWith("0") && /^[2-8]/.test(d[1])) return null;
+    // STD + number without trunk 0 (e.g. 4428251234 for Chennai).
+    if (d.length === 10 && /^[2-5]/.test(d)) return null;
+    // Local landline without STD (common for Tamil Nadu shop numbers).
+    if (d.length >= 6 && d.length <= 8 && /^[2-8]/.test(d)) return null;
+    return "Enter a valid Indian mobile or landline number.";
+  }
+  return "Enter a 10-digit mobile number.";
 }
 
 export function aadhaar(v: string | null | undefined): string | null {
@@ -68,6 +81,14 @@ export function gstRate(v: unknown): string | null {
 
 export function minLen(v: unknown, label: string, n: number): string | null {
   if (String(v ?? "").trim().length < n) return `${label} must be at least ${n} characters.`;
+  return null;
+}
+
+/** Vendor / business names: letters, numbers, spaces, and punctuation such as & . , ' - / ( ). */
+export function businessName(v: unknown, label = "Name"): string | null {
+  const s = String(v ?? "").trim();
+  if (s.length < 2) return `${label} must be at least 2 characters.`;
+  if (s.length > 200) return `${label} is too long.`;
   return null;
 }
 

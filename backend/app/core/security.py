@@ -49,7 +49,14 @@ def create_refresh_token(subject: str) -> str:
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+    # Small leeway absorbs minor client/server clock skew that would otherwise
+    # reject a still-valid token as expired.
+    return jwt.decode(
+        token,
+        settings.secret_key,
+        algorithms=[settings.jwt_algorithm],
+        leeway=60,
+    )
 
 
 # --- TOTP 2FA ---

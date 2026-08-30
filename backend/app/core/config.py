@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = "change-me"
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 14
     jwt_algorithm: str = "HS256"
 
