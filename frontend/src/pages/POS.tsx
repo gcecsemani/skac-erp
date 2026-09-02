@@ -6,11 +6,13 @@ import { printThermalReceipt } from "../print";
 import { Card, PageHeader, Badge, Modal, Field, Switch } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
-import { cacheProducts, getCachedProducts, pendingCount, queueInvoice, syncOutbox } from "../offline";
+import { getCachedCustomers, getCachedProducts, matchCustomer, pendingCount, queueInvoice, refreshCustomers, refreshProducts, syncOutbox, upsertCached } from "../offline";
 import { getOpenPrintDialog, setOpenPrintDialog } from "../printPref";
 import * as V from "../validate";
 
 const emptyFarmer = { name: "", phone: "", aadhaar_no: "", village: "", district: "", credit_allowed: false, credit_limit: "" };
+const POS_TILE_CAP = 80;
+const FARMER_PICK_CAP = 12;
 
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -28,11 +30,10 @@ export default function POS() {
   const [pending, setPending] = useState(0);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
-  const [customers, setCustomers] = useState<any[]>([]);
+  const [farmerBook, setFarmerBook] = useState<any[]>([]);
   const [customer, setCustomer] = useState<any | null>(null);
   const [custQuery, setCustQuery] = useState("");
   const [custOpen, setCustOpen] = useState(false);
-  const [custLoading, setCustLoading] = useState(false);
   const [addFarmer, setAddFarmer] = useState<any | null>(null);
   const [farmerErr, setFarmerErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -51,10 +52,9 @@ export default function POS() {
     if (!id) return;
     const seq = ++loadSeq.current;
     try {
-      const p = await api.products(undefined, undefined, undefined, id);
+      const p = await refreshProducts(id);
       if (seq !== loadSeq.current) return;
       setProducts(p);
-      cacheProducts(p).catch(() => {});
     } catch {
       if (seq !== loadSeq.current) return;
       setProducts(await getCachedProducts());
@@ -63,6 +63,9 @@ export default function POS() {
 
   useEffect(() => {
     api.branches().then((b) => { setBranches(b); if (b[0]) setBranchId(b[0].id); }).catch(() => {});
+    getCachedProducts().then((cached) => { if (cached.length) setProducts(cached); }).catch(() => {});
+    getCachedCustomers().then((cached) => { if (cached.length) setFarmerBook(cached); }).catch(() => {});
+    refreshCustomers().then(setFarmerBook).catch(() => {});
     const on = () => setOnline(true), off = () => setOnline(false);
     const onFocus = () => { if (navigator.onLine) loadProducts(); };
     window.addEventListener("online", on); window.addEventListener("offline", off);
@@ -82,35 +85,29 @@ export default function POS() {
     if (branchId) loadProducts(branchId);
   }, [branchId]);
 
-  useEffect(() => {
-    if (!custOpen) return;
-    const q = custQuery.trim();
-    const t = setTimeout(async () => {
-      setCustLoading(true);
-      try {
-        setCustomers(await api.customers(q || undefined, 12));
-      } catch {
-        setCustomers([]);
-      } finally {
-        setCustLoading(false);
-      }
-    }, q ? 250 : 0);
-    return () => clearTimeout(t);
-  }, [custQuery, custOpen]);
-
-  const filtered = useMemo(() => {
+  const filteredAll = useMemo(() => {
     const q = search.toLowerCase();
     const rows = products.filter((p) => !q || p.name.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q) || p.barcode?.toLowerCase().includes(q));
     return rows.sort((a, b) => Number(!!b.is_favorite) - Number(!!a.is_favorite) || String(a.name).localeCompare(String(b.name)));
   }, [products, search]);
+  const filtered = filteredAll.slice(0, POS_TILE_CAP);
+
+  const farmerHits = useMemo(() => {
+    const q = custQuery.trim();
+    if (!q) return [];
+    return farmerBook.filter((c) => matchCustomer(c, q)).slice(0, FARMER_PICK_CAP);
+  }, [farmerBook, custQuery]);
 
   const toggleFav = async (p: any) => {
     const next = !p.is_favorite;
-    setProducts((cur) => cur.map((x) => x.id === p.id ? { ...x, is_favorite: next } : x));
+    const updated = { ...p, is_favorite: next };
+    setProducts((cur) => cur.map((x) => x.id === p.id ? updated : x));
+    upsertCached("products", updated);
     try {
       await api.setFavorite(p.id, next);
     } catch {
       setProducts((cur) => cur.map((x) => x.id === p.id ? { ...x, is_favorite: p.is_favorite } : x));
+      upsertCached("products", p);
     }
   };
 
@@ -225,7 +222,8 @@ export default function POS() {
         land_holding_acres: null,
         credit_limit: addFarmer.credit_limit ? Number(addFarmer.credit_limit) : 0,
       });
-      setCustomers((cur) => [created, ...cur]);
+      upsertCached("customers", created);
+      setFarmerBook((cur) => [created, ...cur.filter((x) => x.id !== created.id)]);
       selectCustomer(created);
       setAddFarmer(null);
     } catch (e: any) { setFarmerErr(e.message); }
@@ -286,9 +284,17 @@ export default function POS() {
       setProducts((cur) => cur.map((p) => {
         const sold = payload.lines.find((l) => l.product_id === p.id);
         if (!sold || p.stock_qty == null) return p;
-        return { ...p, stock_qty: Math.max(0, Number(p.stock_qty) - Number(sold.quantity)) };
+        const next = { ...p, stock_qty: Math.max(0, Number(p.stock_qty) - Number(sold.quantity)) };
+        upsertCached("products", next);
+        return next;
       }));
+      if (customer && due > 0) {
+        const next = { ...customer, outstanding_balance: Number(customer.outstanding_balance || 0) + due };
+        upsertCached("customers", next);
+        setFarmerBook((cur) => cur.map((x) => x.id === next.id ? next : x));
+      }
       loadProducts(branchId);
+      refreshCustomers().then(setFarmerBook).catch(() => {});
     } catch (e: any) { setMsg({ text: e.message, ok: false }); }
   };
 
@@ -322,6 +328,11 @@ export default function POS() {
             <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
             <input placeholder="Search product or scan barcode…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ paddingLeft: 36 }} />
           </div>
+          {filteredAll.length > POS_TILE_CAP && (
+            <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+              Showing {POS_TILE_CAP} of {filteredAll.length} — type to find a product
+            </p>
+          )}
           <div className="product-grid">
             {filtered.map((p) => {
               const stock = stockOf(p);
@@ -412,8 +423,7 @@ export default function POS() {
                 </div>
                 {custOpen && (
                   <div style={{ position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0, marginTop: 4, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-lg)", overflow: "hidden" }}>
-                    {custLoading && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>Searching…</div>}
-                    {customers.map((c) => (
+                    {farmerHits.map((c) => (
                       <button key={c.id} className="row" onClick={() => selectCustomer(c)}
                         style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: "9px 12px", cursor: "pointer", justifyContent: "space-between" }}>
                         <span>
@@ -423,7 +433,7 @@ export default function POS() {
                         {c.credit_allowed && <Badge tone="info">Khata {inr(c.outstanding_balance)}</Badge>}
                       </button>
                     ))}
-                    {!custLoading && customers.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>{custQuery.trim() ? "No matching farmer" : "Type name, phone or Aadhaar — search stays fast at 10,000+ farmers"}</div>}
+                    {farmerHits.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>{custQuery.trim() ? "No matching farmer" : "Type name, phone or Aadhaar — search stays fast at 10,000+ farmers"}</div>}
                     <button className="row" onMouseDown={(e) => e.preventDefault()}
                       onClick={() => { setFarmerErr(""); setAddFarmer({ ...emptyFarmer, name: custQuery }); setCustOpen(false); }}
                       style={{ width: "100%", textAlign: "left", background: "var(--surface-2)", border: "none", borderTop: "1px solid var(--border)", padding: "9px 12px", cursor: "pointer", color: "var(--brand-600)", fontWeight: 600, gap: 8 }}>

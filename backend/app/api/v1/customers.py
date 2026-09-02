@@ -51,7 +51,7 @@ def _assert_unique_aadhaar(db: Session, org_id: int, aadhaar: str | None, exclud
 @router.get("", response_model=list[CustomerOut])
 def list_customers(
     search: str | None = None,
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=30000),
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Customer]:

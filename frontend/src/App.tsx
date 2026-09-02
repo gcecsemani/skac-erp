@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, ShoppingCart, ReceiptText, Undo2, Users, Package,
@@ -6,6 +6,7 @@ import {
   ShieldCheck, UserCog, Menu, Leaf, LogOut, Building2, Wallet, Settings2, MapPin,
 } from "lucide-react";
 import { useAuth } from "./auth";
+import { prefetchMasters } from "./offline";
 import { canAccessPath, homePath, isOwner } from "./roles";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
@@ -134,6 +135,10 @@ export default function App() {
   const { user, loading } = useAuth();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
+
+  useEffect(() => {
+    if (user) prefetchMasters().catch(() => {});
+  }, [user?.id]);
 
   if (loading) return <div className="loading">Loading…</div>;
   if (!user) return <Login />;

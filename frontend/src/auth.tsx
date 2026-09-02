@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { api, AUTH_EXPIRED_EVENT, clearToken, getRefreshToken, getToken, setSession } from "./api";
+import { clearCatalogs } from "./offline";
 
 interface AuthState {
   user: any | null;
@@ -15,7 +16,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const onExpired = () => setUser(null);
+    const onExpired = () => {
+      clearCatalogs().catch(() => {});
+      setUser(null);
+    };
     window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
   }, []);
@@ -41,6 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = () => {
     clearToken();
+    clearCatalogs().catch(() => {});
     setUser(null);
   };
 

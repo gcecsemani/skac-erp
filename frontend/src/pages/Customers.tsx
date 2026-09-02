@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle } from "lucide-react";
 import { api } from "../api";
 import { inr } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
+import { getCachedCustomers, matchCustomer, refreshCustomers, removeCached, upsertCached } from "../offline";
 import * as V from "../validate";
 
 const empty = { name: "", phone: "", aadhaar_no: "", village: "", district: "", land_holding_acres: "", gstin: "", credit_allowed: false, credit_limit: "" };
+const LIST_CAP = 200;
 
 export default function Customers() {
   const { bundle, ready } = useConfigBundle();
@@ -23,8 +25,13 @@ export default function Customers() {
   const [remind, setRemind] = useState<any | null>(null);
   const [remindBusy, setRemindBusy] = useState(false);
 
-  const load = (q?: string) => api.customers(q || undefined, 200).then(setRows).catch(() => setRows([]));
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    getCachedCustomers().then((cached) => { if (cached.length) setRows(cached); }).catch(() => {});
+    refreshCustomers().then(setRows).catch(() => setRows((cur) => cur || []));
+  }, []);
+
+  const filtered = useMemo(() => (rows || []).filter((r) => matchCustomer(r, search)), [rows, search]);
+  const shown = filtered.slice(0, LIST_CAP);
 
   const openCreate = () => { setEditId(null); setForm(empty); setErr(""); setOpen(true); };
   const openEdit = (r: any) => {
@@ -34,7 +41,11 @@ export default function Customers() {
   };
   const remove = async (r: any) => {
     if (!confirm(`Delete farmer "${r.name}"?`)) return;
-    try { await api.deleteCustomer(r.id); load(search); } catch (e: any) { alert(e.message); }
+    try {
+      await api.deleteCustomer(r.id);
+      removeCached("customers", r.id);
+      setRows((cur) => (cur || []).filter((x) => x.id !== r.id));
+    } catch (e: any) { alert(e.message); }
   };
 
   const submit = async () => {
@@ -55,9 +66,13 @@ export default function Customers() {
       credit_limit: form.credit_limit ? Number(form.credit_limit) : 0,
     };
     try {
-      if (editId) await api.updateCustomer(editId, payload);
-      else await api.createCustomer(payload);
-      setOpen(false); setForm(empty); setEditId(null); load(search);
+      const saved = editId ? await api.updateCustomer(editId, payload) : await api.createCustomer(payload);
+      upsertCached("customers", saved);
+      setRows((cur) => {
+        const list = cur || [];
+        return editId ? list.map((x) => x.id === saved.id ? { ...x, ...saved } : x) : [saved, ...list.filter((x) => x.id !== saved.id)];
+      });
+      setOpen(false); setForm(empty); setEditId(null);
     } catch (e: any) { setErr(e.message); }
   };
 
@@ -74,7 +89,7 @@ export default function Customers() {
               { key: "name", label: "Name" }, { key: "phone", label: "Phone" },
               { key: "village", label: "Village" }, { key: "district", label: "District" },
               { key: "outstanding_balance", label: "Outstanding", num: true, money: true },
-            ]} rows={rows || []} />
+            ]} rows={filtered} />
             <button className="btn btn-primary" onClick={openCreate}><Plus size={16} /> Add Farmer</button>
           </div>
         }
@@ -83,8 +98,13 @@ export default function Customers() {
         <div className="row mb-16" style={{ position: "relative", maxWidth: 340 }}>
           <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
           <input placeholder="Search name, phone or Aadhaar…" value={search}
-            onChange={(e) => { setSearch(e.target.value); load(e.target.value); }} style={{ paddingLeft: 36 }} />
+            onChange={(e) => setSearch(e.target.value)} style={{ paddingLeft: 36 }} />
         </div>
+        {filtered.length > LIST_CAP && (
+          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+            Showing {LIST_CAP} of {filtered.length} matching farmers — keep typing to narrow the list
+          </p>
+        )}
         <Table
           columns={[
             { key: "name", label: "Name" },
@@ -117,7 +137,7 @@ export default function Customers() {
               </div>
             ) },
           ]}
-          rows={rows}
+          rows={shown}
           empty="No farmers yet"
         />
       </Card>
@@ -159,7 +179,12 @@ export default function Customers() {
               if (!amount || amount <= 0) { setPayErr("Enter an amount greater than zero."); return; }
               try {
                 await api.customerPayment(pay.id, { amount, mode: payForm.mode, note: payForm.note || null });
-                setPay(null); load(search);
+                const nextBal = Math.max(0, Number(pay.outstanding_balance || 0) - amount);
+                const next = { ...pay, outstanding_balance: nextBal };
+                upsertCached("customers", next);
+                setRows((cur) => (cur || []).map((x) => x.id === next.id ? { ...x, ...next } : x));
+                setPay(null);
+                refreshCustomers().then(setRows).catch(() => {});
               } catch (e: any) { setPayErr(e.message); }
             }}>Record payment</button>
           </>}

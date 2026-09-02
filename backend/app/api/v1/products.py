@@ -22,7 +22,7 @@ router = APIRouter(prefix="/products", tags=["products"])
 def list_products(
     category: ProductCategory | None = None,
     search: str | None = None,
-    limit: int | None = Query(None, ge=1, le=2000),
+    limit: int | None = Query(None, ge=1, le=10000),
     branch_id: int | None = None,
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),

@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, Pencil, Trash2, Search, Star } from "lucide-react";
 import { api } from "../api";
 import { CATEGORY_COLORS, inr } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table } from "../components/ui";
 import { ConfigOptions, GstSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
+import { getCachedProducts, matchProduct, refreshProducts, removeCached, upsertCached } from "../offline";
 import * as V from "../validate";
 
 const empty = {
@@ -12,6 +13,7 @@ const empty = {
   gst_rate: "5", mrp: "", purchase_price: "", sale_price: "", reorder_level: "",
   npk_n: "", npk_p: "", npk_k: "", toxicity_class: "", germination_pct: "", seed_lot: "",
 };
+const LIST_CAP = 200;
 
 export default function Products() {
   const { bundle } = useConfigBundle();
@@ -23,17 +25,27 @@ export default function Products() {
   const [form, setForm] = useState<any>(empty);
   const [err, setErr] = useState("");
 
-  const load = (c?: string, search?: string) =>
-    api.products(search || undefined, c || undefined).then(setRows).catch(() => setRows([]));
   useEffect(() => {
-    const t = setTimeout(() => load(cat, q.trim()), q ? 200 : 0);
-    return () => clearTimeout(t);
-  }, [cat, q]);
+    getCachedProducts().then((cached) => { if (cached.length) setRows(cached); }).catch(() => {});
+    refreshProducts().then(setRows).catch(() => setRows((cur) => cur || []));
+  }, []);
+
+  const filtered = useMemo(
+    () => (rows || []).filter((r) => matchProduct(r, q, cat || undefined))
+      .sort((a, b) => Number(!!b.is_favorite) - Number(!!a.is_favorite) || String(a.name).localeCompare(String(b.name))),
+    [rows, q, cat],
+  );
+  const shown = filtered.slice(0, LIST_CAP);
 
   const toggleFav = async (r: any) => {
     const next = !r.is_favorite;
-    setRows((cur) => (cur || []).map((x) => x.id === r.id ? { ...x, is_favorite: next } : x));
-    try { await api.setFavorite(r.id, next); } catch { load(cat, q.trim()); }
+    const updated = { ...r, is_favorite: next };
+    setRows((cur) => (cur || []).map((x) => x.id === r.id ? updated : x));
+    upsertCached("products", updated);
+    try { await api.setFavorite(r.id, next); } catch {
+      setRows((cur) => (cur || []).map((x) => x.id === r.id ? r : x));
+      upsertCached("products", r);
+    }
   };
 
   const openCreate = () => { setEditId(null); setForm(empty); setErr(""); setOpen(true); };
@@ -44,7 +56,11 @@ export default function Products() {
   };
   const remove = async (r: any) => {
     if (!confirm(`Delete product "${r.name}"?`)) return;
-    try { await api.deleteProduct(r.id); load(cat, q.trim()); } catch (e: any) { alert(e.message); }
+    try {
+      await api.deleteProduct(r.id);
+      removeCached("products", r.id);
+      setRows((cur) => (cur || []).filter((x) => x.id !== r.id));
+    } catch (e: any) { alert(e.message); }
   };
 
   const submit = async () => {
@@ -70,9 +86,13 @@ export default function Products() {
       seed_lot: form.seed_lot || null,
     };
     try {
-      if (editId) await api.updateProduct(editId, payload);
-      else await api.createProduct(payload);
-      setOpen(false); setForm(empty); setEditId(null); load(cat, q.trim());
+      const saved = editId ? await api.updateProduct(editId, payload) : await api.createProduct(payload);
+      upsertCached("products", saved);
+      setRows((cur) => {
+        const list = cur || [];
+        return editId ? list.map((x) => x.id === saved.id ? { ...x, ...saved } : x) : [saved, ...list.filter((x) => x.id !== saved.id)];
+      });
+      setOpen(false); setForm(empty); setEditId(null);
     } catch (e: any) { setErr(e.message); }
   };
 
@@ -89,7 +109,7 @@ export default function Products() {
               { key: "name", label: "Product" }, { key: "sku", label: "SKU" },
               { key: "category", label: "Category" }, { key: "hsn_code", label: "HSN" },
               { key: "gst_rate", label: "GST%" }, { key: "sale_price", label: "Sale", num: true, money: true },
-            ]} rows={rows || []} />
+            ]} rows={filtered} />
             <button className="btn btn-primary" onClick={openCreate}><Plus size={16} /> Add Product</button>
           </div>
         }
@@ -108,6 +128,11 @@ export default function Products() {
             <input placeholder="Search name, SKU or barcode…" value={q} onChange={(e) => setQ(e.target.value)} style={{ paddingLeft: 36 }} />
           </div>
         </div>
+        {filtered.length > LIST_CAP && (
+          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+            Showing {LIST_CAP} of {filtered.length} matching products — keep typing to narrow the list
+          </p>
+        )}
         <Table
           columns={[
             { key: "fav", label: "", render: (r) => (
@@ -130,7 +155,7 @@ export default function Products() {
               </div>
             ) },
           ]}
-          rows={rows}
+          rows={shown}
           empty="No products"
         />
       </Card>
