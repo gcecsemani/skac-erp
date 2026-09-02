@@ -137,8 +137,13 @@ class PurchaseReturnItem(Base, PKMixin, TimestampMixin):
     batch_id: Mapped[int | None] = mapped_column(ForeignKey("batch.id"))
     product_name: Mapped[str] = mapped_column(String(200), nullable=False)
     batch_no: Mapped[str | None] = mapped_column(String(80))
+    hsn_code: Mapped[str | None] = mapped_column(String(12))
+    packing: Mapped[str | None] = mapped_column(String(20))
     quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+    gst_rate: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"))
+    taxable_value: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
 
     purchase_return: Mapped["PurchaseReturn"] = relationship(back_populates="items")

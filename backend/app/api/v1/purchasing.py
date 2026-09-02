@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.models.inventory import Batch, Stock
 from app.models.enums import MovementType, PurchaseOrderStatus
+from app.models.organization import Branch, Organization
 from app.models.product import Product
 from app.models.purchase import (
     GRN,
@@ -126,6 +127,35 @@ class PurchaseReturnIn(BaseModel):
     grn_id: int
     reason: str = Field(min_length=3, max_length=255)
     items: list[PurchaseReturnItemIn] = Field(min_length=1)
+
+
+def _gstin_state(gstin: str | None, fallback: str | None = None) -> str | None:
+    g = (gstin or "").strip().upper()
+    if len(g) >= 2 and g[:2].isdigit():
+        return g[:2]
+    return fallback or None
+
+
+def _pan_from_gstin(gstin: str | None, fallback: str | None = None) -> str | None:
+    g = (gstin or "").strip().upper()
+    if len(g) >= 12:
+        return g[2:12]
+    return fallback or None
+
+
+def _branch_address(b: Branch | None) -> str | None:
+    if b is None:
+        return None
+    parts = [p for p in [b.address_line1, b.address_line2, b.city, b.district, b.state, b.pincode] if p]
+    return ", ".join(parts) or None
+
+
+def _line_gst(qty: Decimal, unit_price: Decimal, gst_rate: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+    TWO = Decimal("0.01")
+    taxable = (qty * unit_price).quantize(TWO)
+    rate = gst_rate or Decimal("0")
+    tax = (taxable * rate / Decimal("100")).quantize(TWO)
+    return taxable, tax, (taxable + tax).quantize(TWO)
 
 
 # --- Vendors ---
@@ -505,6 +535,9 @@ def _serialize_grn(db: Session, g: GRN) -> dict:
             "id": it.id,
             "product_id": it.product_id,
             "product_name": product.name if product else str(it.product_id),
+            "hsn_code": product.hsn_code if product else None,
+            "packing": product.base_unit if product else None,
+            "gst_rate": float(product.gst_rate) if product else 0,
             "batch_id": it.batch_id,
             "batch_no": it.batch_no,
             "expiry_date": it.expiry_date.isoformat() if it.expiry_date else None,
@@ -541,29 +574,73 @@ def get_grn(
 def _serialize_purchase_return(db: Session, note: PurchaseReturn) -> dict:
     vendor = db.get(Vendor, note.vendor_id)
     grn = db.get(GRN, note.grn_id)
+    branch = db.get(Branch, note.branch_id)
+    org = db.get(Organization, note.organization_id)
+    our_gstin = branch.gstin if branch else None
+    vendor_gstin = vendor.gstin if vendor else None
+    our_state = _gstin_state(our_gstin, branch.state_code if branch else None)
+    vendor_state = _gstin_state(vendor_gstin, our_state)
+    tax_type = "inter" if our_state and vendor_state and our_state != vendor_state else "intra"
+    taxable_total = tax_total = Decimal("0")
+    items = []
+    for i in note.items:
+        gst_rate = i.gst_rate or Decimal("0")
+        taxable = i.taxable_value if i.taxable_value else (i.quantity * i.unit_price)
+        tax = i.tax_amount if i.tax_amount else Decimal("0")
+        # Older debit notes stored qty × rate only; keep printed GST at zero for those.
+        if not i.tax_amount and gst_rate == 0:
+            taxable = i.line_total or taxable
+            tax = Decimal("0")
+        taxable_total += Decimal(taxable)
+        tax_total += Decimal(tax)
+        grn_item = db.get(GRNItem, i.grn_item_id) if i.grn_item_id else None
+        items.append({
+            "grn_item_id": i.grn_item_id,
+            "product_id": i.product_id,
+            "product_name": i.product_name,
+            "hsn_code": i.hsn_code,
+            "packing": i.packing,
+            "batch_no": i.batch_no,
+            "expiry_date": grn_item.expiry_date.isoformat() if grn_item and grn_item.expiry_date else None,
+            "quantity": float(i.quantity),
+            "unit_price": float(i.unit_price),
+            "gst_rate": float(gst_rate),
+            "taxable_value": float(taxable),
+            "tax_amount": float(tax),
+            "line_total": float(i.line_total),
+        })
     return {
         "id": note.id,
         "note_no": note.note_no,
         "note_date": note.note_date.isoformat(),
         "reason": note.reason,
+        "taxable_total": float(taxable_total),
+        "tax_total": float(tax_total),
         "total": float(note.total),
+        "tax_type": tax_type,
         "vendor_id": note.vendor_id,
         "vendor": vendor.name if vendor else None,
+        "vendor_gstin": vendor_gstin,
+        "vendor_phone": vendor.phone if vendor else None,
+        "vendor_address": vendor.address if vendor else None,
+        "vendor_pan": _pan_from_gstin(vendor_gstin),
         "grn_id": note.grn_id,
         "grn_no": grn.grn_no if grn else None,
+        "vendor_invoice_no": grn.vendor_invoice_no if grn else None,
+        "grn_date": grn.received_date.isoformat() if grn else None,
         "branch_id": note.branch_id,
-        "items": [
-            {
-                "grn_item_id": i.grn_item_id,
-                "product_id": i.product_id,
-                "product_name": i.product_name,
-                "batch_no": i.batch_no,
-                "quantity": float(i.quantity),
-                "unit_price": float(i.unit_price),
-                "line_total": float(i.line_total),
-            }
-            for i in note.items
-        ],
+        "organization_name": org.name if org else None,
+        "organization_pan": (org.pan if org and org.pan else None) or _pan_from_gstin(our_gstin),
+        "branch_name": branch.name if branch else None,
+        "branch_phone": branch.phone if branch else None,
+        "branch_gstin": our_gstin,
+        "branch_address": _branch_address(branch),
+        "branch_state": branch.state if branch else None,
+        "branch_state_code": our_state,
+        "printer_name": branch.printer_name if branch else None,
+        "printer_type": branch.printer_type if branch else None,
+        "thermal_paper_mm": branch.thermal_paper_mm if branch else None,
+        "items": items,
     }
 
 
@@ -598,7 +675,6 @@ def create_purchase_return(
     current: CurrentUser = Depends(require_permission(rbac.P_PURCHASE_MANAGE)),
     db: Session = Depends(get_db),
 ) -> dict:
-    TWO = Decimal("0.01")
     grn = db.get(GRN, payload.grn_id)
     if grn is None or grn.organization_id != current.organization_id:
         raise HTTPException(status_code=404, detail="GRN not found")
@@ -648,11 +724,15 @@ def create_purchase_return(
                     f"on hand at this branch — the rest has already been sold or transferred."
                 ),
             )
-        line_total = (it.quantity * line.unit_price).quantize(TWO)
+        gst_rate = product.gst_rate if product else Decimal("0")
+        packing = product.base_unit if product else None
+        hsn_code = product.hsn_code if product else None
+        taxable, tax, line_total = _line_gst(it.quantity, line.unit_price, gst_rate)
         note.items.append(PurchaseReturnItem(
             grn_item_id=line.id, product_id=line.product_id, batch_id=line.batch_id,
-            product_name=name, batch_no=line.batch_no, quantity=it.quantity,
-            unit_price=line.unit_price, line_total=line_total,
+            product_name=name, batch_no=line.batch_no, hsn_code=hsn_code, packing=packing,
+            quantity=it.quantity, unit_price=line.unit_price, gst_rate=gst_rate,
+            taxable_value=taxable, tax_amount=tax, line_total=line_total,
         ))
         total += line_total
         if grn.purchase_order_id:

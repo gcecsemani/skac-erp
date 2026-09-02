@@ -109,14 +109,16 @@ export default function Purchasing() {
     const parts = [b.address_line1, b.address_line2, b.city, b.district, b.state, b.pincode].filter(Boolean);
     return {
       ...doc,
-      organization_name: "Sri Kumaran Agri Clinic",
-      branch_name: b.name,
-      branch_phone: b.phone,
-      branch_gstin: b.gstin,
-      branch_address: parts.join(", ") || undefined,
-      printer_name: b.printer_name,
-      printer_type: b.printer_type,
-      thermal_paper_mm: b.thermal_paper_mm,
+      organization_name: doc.organization_name || "Sri Kumaran Agri Clinic",
+      branch_name: doc.branch_name || b.name,
+      branch_phone: doc.branch_phone || b.phone,
+      branch_gstin: doc.branch_gstin || b.gstin,
+      branch_address: doc.branch_address || parts.join(", ") || undefined,
+      branch_state: doc.branch_state || b.state,
+      branch_state_code: doc.branch_state_code || b.state_code,
+      printer_name: doc.printer_name || b.printer_name,
+      printer_type: doc.printer_type || b.printer_type,
+      thermal_paper_mm: doc.thermal_paper_mm || b.thermal_paper_mm,
     };
   };
 
@@ -449,6 +451,7 @@ export default function Purchasing() {
                   columns={[
                     { key: "product_name", label: "Product" },
                     { key: "batch_no", label: "Batch" },
+                    { key: "gst_rate", label: "GST %", num: true, render: (r) => `${Number(r.gst_rate || 0)}%` },
                     { key: "quantity", label: "Received", num: true },
                     { key: "returned_quantity", label: "Already returned", num: true },
                     { key: "on_hand", label: "On hand", num: true },
@@ -463,7 +466,20 @@ export default function Purchasing() {
                   empty="No lines on this GRN"
                 />
               )}
-              {grnDetail && <p className="muted" style={{ margin: "8px 0 0" }}>Return qty cannot exceed remaining GRN qty or on-hand stock of that batch (already sold stock cannot be returned).</p>}
+              {grnDetail && (() => {
+                const preview = (grnDetail.items || []).reduce((acc: any, r: any) => {
+                  const qty = Number(returnQty[r.id] || 0);
+                  const taxable = qty * Number(r.unit_price || 0);
+                  const tax = taxable * Number(r.gst_rate || 0) / 100;
+                  return { taxable: acc.taxable + taxable, tax: acc.tax + tax };
+                }, { taxable: 0, tax: 0 });
+                return (
+                  <p className="muted" style={{ margin: "8px 0 0" }}>
+                    Return qty cannot exceed remaining GRN qty or on-hand stock of that batch (already sold stock cannot be returned).
+                    Debit note will include GST: taxable {inr(preview.taxable)} + GST {inr(preview.tax)} = <strong>{inr(preview.taxable + preview.tax)}</strong>
+                  </p>
+                );
+              })()}
             </>
           )}
         </Modal>
@@ -501,15 +517,20 @@ export default function Purchasing() {
             <div><div className="muted">Date</div><strong>{viewReturn.note_date}</strong></div>
             <div><div className="muted">Vendor</div><strong>{viewReturn.vendor || "—"}</strong></div>
             <div><div className="muted">Against GRN</div><strong>{viewReturn.grn_no || "—"}</strong></div>
+            <div><div className="muted">Taxable</div><strong>{inr(viewReturn.taxable_total ?? viewReturn.total)}</strong></div>
+            <div><div className="muted">GST</div><strong>{inr(viewReturn.tax_total || 0)}</strong></div>
             <div><div className="muted">Amount</div><strong>{inr(viewReturn.total)}</strong></div>
           </div>
           {viewReturn.reason && <p className="muted" style={{ marginTop: 0 }}>Reason: {viewReturn.reason}</p>}
           <Table
             columns={[
               { key: "product_name", label: "Product" },
+              { key: "hsn_code", label: "HSN", render: (r) => r.hsn_code || "—" },
               { key: "batch_no", label: "Batch", render: (r) => r.batch_no || "—" },
               { key: "quantity", label: "Qty", num: true },
               { key: "unit_price", label: "Rate", num: true, render: (r) => inr(r.unit_price) },
+              { key: "gst_rate", label: "GST %", num: true, render: (r) => `${Number(r.gst_rate || 0)}%` },
+              { key: "tax_amount", label: "GST", num: true, render: (r) => inr(r.tax_amount || 0) },
               { key: "line_total", label: "Amount", num: true, render: (r) => inr(r.line_total) },
             ]}
             rows={viewReturn.items || []}

@@ -40,6 +40,11 @@ def _ensure_schema() -> None:
     _add_column_if_missing("branch", "printer_name", "printer_name VARCHAR(120)")
     _add_column_if_missing("branch", "printer_type", "printer_type VARCHAR(20) DEFAULT 'thermal'")
     _add_column_if_missing("branch", "thermal_paper_mm", "thermal_paper_mm INTEGER NOT NULL DEFAULT 80")
+    _add_column_if_missing("purchase_return_item", "hsn_code", "hsn_code VARCHAR(12)")
+    _add_column_if_missing("purchase_return_item", "packing", "packing VARCHAR(20)")
+    _add_column_if_missing("purchase_return_item", "gst_rate", "gst_rate NUMERIC(5, 2) NOT NULL DEFAULT 0")
+    _add_column_if_missing("purchase_return_item", "taxable_value", "taxable_value NUMERIC(14, 2) NOT NULL DEFAULT 0")
+    _add_column_if_missing("purchase_return_item", "tax_amount", "tax_amount NUMERIC(14, 2) NOT NULL DEFAULT 0")
     _add_index_if_missing("customer", "ix_customer_aadhaar_no", "aadhaar_no")
     db = SessionLocal()
     try:
