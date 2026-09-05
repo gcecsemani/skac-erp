@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle } from "lucide-react";
+import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen } from "lucide-react";
 import { api } from "../api";
 import { inr } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table } from "../components/ui";
@@ -9,7 +9,6 @@ import { getCachedCustomers, matchCustomer, refreshCustomers, removeCached, upse
 import * as V from "../validate";
 
 const empty = { name: "", phone: "", aadhaar_no: "", village: "", district: "", land_holding_acres: "", gstin: "", credit_allowed: false, credit_limit: "" };
-const LIST_CAP = 200;
 
 export default function Customers() {
   const { bundle, ready } = useConfigBundle();
@@ -24,14 +23,20 @@ export default function Customers() {
   const [payErr, setPayErr] = useState("");
   const [remind, setRemind] = useState<any | null>(null);
   const [remindBusy, setRemindBusy] = useState(false);
+  const [ledger, setLedger] = useState<any | null>(null);
+  const [payConfirm, setPayConfirm] = useState(false);
 
   useEffect(() => {
     getCachedCustomers().then((cached) => { if (cached.length) setRows(cached); }).catch(() => {});
     refreshCustomers().then(setRows).catch(() => setRows((cur) => cur || []));
   }, []);
 
-  const filtered = useMemo(() => (rows || []).filter((r) => matchCustomer(r, search)), [rows, search]);
-  const shown = filtered.slice(0, LIST_CAP);
+  const filtered = useMemo(
+    () => (rows || [])
+      .filter((r) => matchCustomer(r, search))
+      .sort((a, b) => Number(b.outstanding_balance || 0) - Number(a.outstanding_balance || 0) || String(a.name).localeCompare(String(b.name))),
+    [rows, search],
+  );
 
   const openCreate = () => { setEditId(null); setForm(empty); setErr(""); setOpen(true); };
   const openEdit = (r: any) => {
@@ -52,7 +57,9 @@ export default function Customers() {
     setErr("");
     const msg = V.firstError(
       V.minLen(form.name, "Name", 2),
-      V.phone(form.phone),
+      V.phone(form.phone, { required: true }),
+      V.required(form.district, "District"),
+      V.required(form.village, "Village"),
       V.aadhaar(form.aadhaar_no),
       V.gstin(form.gstin),
       form.credit_limit ? V.nonNegative(form.credit_limit, "Credit limit") : null,
@@ -89,7 +96,7 @@ export default function Customers() {
               { key: "name", label: "Name" }, { key: "phone", label: "Phone" },
               { key: "village", label: "Village" }, { key: "district", label: "District" },
               { key: "outstanding_balance", label: "Outstanding", num: true, money: true },
-            ]} rows={filtered} />
+            ]} rows={rows || []} />
             <button className="btn btn-primary" onClick={openCreate}><Plus size={16} /> Add Farmer</button>
           </div>
         }
@@ -100,9 +107,9 @@ export default function Customers() {
           <input placeholder="Search name, phone or Aadhaar…" value={search}
             onChange={(e) => setSearch(e.target.value)} style={{ paddingLeft: 36 }} />
         </div>
-        {filtered.length > LIST_CAP && (
+        {search.trim() && (
           <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-            Showing {LIST_CAP} of {filtered.length} matching farmers — keep typing to narrow the list
+            Showing {filtered.length} match{filtered.length === 1 ? "" : "es"} — Excel/PDF export includes all {rows.length} farmers
           </p>
         )}
         <Table
@@ -116,11 +123,14 @@ export default function Customers() {
             { key: "outstanding_balance", label: "Outstanding", num: true, render: (r) => <strong style={{ color: r.outstanding_balance > 0 ? "var(--danger)" : "inherit" }}>{inr(r.outstanding_balance)}</strong> },
             { key: "actions", label: "", render: (r) => (
               <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+                <button className="icon-btn" style={{ width: 30, height: 30 }} title="Ledger / payment history" onClick={async () => {
+                  try { setLedger(await api.customerLedger(r.id)); } catch (e: any) { alert(e.message); }
+                }}><BookOpen size={14} /></button>
                 {r.outstanding_balance > 0 && (
                   <>
                     <button className="icon-btn" style={{ width: 30, height: 30 }} title="Collect khata" onClick={() => {
-                      setPayErr(""); setPay(r);
-                      setPayForm({ amount: String(r.outstanding_balance), mode: "cash", note: "" });
+                      setPayErr(""); setPayConfirm(false); setPay(r);
+                      setPayForm({ amount: "", mode: "cash", note: "" });
                     }}><Wallet size={14} /></button>
                     <button className="icon-btn" style={{ width: 30, height: 30 }} title="WhatsApp reminder" onClick={async () => {
                       try {
@@ -137,8 +147,9 @@ export default function Customers() {
               </div>
             ) },
           ]}
-          rows={shown}
+          rows={filtered}
           empty="No farmers yet"
+          pageSize={50}
         />
       </Card>
 
@@ -148,13 +159,14 @@ export default function Customers() {
           {err && <div className="error">{err}</div>}
           <div className="grid grid-2">
             <Field label="Name" required><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-            <Field label="Phone"><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+            <Field label="Phone" required><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
             <Field label="Aadhaar (12 digits)"><input value={form.aadhaar_no} maxLength={12} onChange={(e) => setForm({ ...form, aadhaar_no: e.target.value.replace(/\D/g, "").slice(0, 12) })} /></Field>
             <LocationFields
               district={form.district || ""}
               village={form.village || ""}
               bundle={bundle}
               ready={ready}
+              required
               onChange={(next) => setForm((f: any) => ({ ...f, ...next }))}
             />
             <Field label="Land (acres)"><input type="number" value={form.land_holding_acres} onChange={(e) => setForm({ ...form, land_holding_acres: e.target.value })} /></Field>
@@ -177,26 +189,37 @@ export default function Customers() {
               setPayErr("");
               const amount = Number(payForm.amount);
               if (!amount || amount <= 0) { setPayErr("Enter an amount greater than zero."); return; }
+              if (amount > Number(pay.outstanding_balance || 0)) {
+                setPayErr(`Amount cannot exceed outstanding ${inr(pay.outstanding_balance)}.`);
+                return;
+              }
+              if (!payConfirm) { setPayConfirm(true); return; }
               try {
                 await api.customerPayment(pay.id, { amount, mode: payForm.mode, note: payForm.note || null });
                 const nextBal = Math.max(0, Number(pay.outstanding_balance || 0) - amount);
                 const next = { ...pay, outstanding_balance: nextBal };
                 upsertCached("customers", next);
                 setRows((cur) => (cur || []).map((x) => x.id === next.id ? { ...x, ...next } : x));
-                setPay(null);
+                setPay(null); setPayConfirm(false);
                 refreshCustomers().then(setRows).catch(() => {});
               } catch (e: any) { setPayErr(e.message); }
-            }}>Record payment</button>
+            }}>{payConfirm ? `Confirm ${inr(Number(payForm.amount) || 0)}?` : "Record payment"}</button>
           </>}
         >
           {payErr && <div className="error">{payErr}</div>}
-          <p className="muted" style={{ marginTop: 0 }}>Outstanding: <strong>{inr(pay.outstanding_balance)}</strong></p>
+          {payConfirm && (
+            <div className="error" style={{ background: "var(--warn-bg)", color: "#92400e" }}>
+              Confirm collecting {inr(Number(payForm.amount) || 0)} from {pay.name}? This will reduce their khata.
+            </div>
+          )}
+          <p className="muted" style={{ marginTop: 0 }}>Outstanding: <strong>{inr(pay.outstanding_balance)}</strong> — type the amount received. It is not filled in automatically.</p>
           <div className="grid grid-2">
-            <Field label="Amount received (₹)">
-              <input type="number" min={0} step="0.01" value={payForm.amount} onChange={(e) => setPayForm({ ...payForm, amount: e.target.value })} />
+            <Field label="Amount received (₹)" required>
+              <input type="number" min={0} step="0.01" value={payForm.amount} placeholder="Enter amount"
+                onChange={(e) => { setPayConfirm(false); setPayForm({ ...payForm, amount: e.target.value }); }} />
             </Field>
             <Field label="Mode">
-              <PaymentSelect value={payForm.mode} onChange={(mode) => setPayForm({ ...payForm, mode })} use="khata" bundle={bundle} />
+              <PaymentSelect value={payForm.mode} onChange={(mode) => { setPayConfirm(false); setPayForm({ ...payForm, mode }); }} use="khata" bundle={bundle} />
             </Field>
           </div>
           <Field label="Note">
@@ -239,6 +262,40 @@ export default function Customers() {
               ? "Cloud API is configured. You can send from SKAC, or open WhatsApp to send from your phone."
               : "No WhatsApp Business API key is set. Open WhatsApp to send this reminder from your phone or WhatsApp Web. To auto-send, add WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID in the backend .env."}
           </p>
+        </Modal>
+      )}
+
+      {ledger && (
+        <Modal title={`Ledger — ${ledger.name}`} onClose={() => setLedger(null)} wide
+          footer={<button className="btn btn-ghost" onClick={() => setLedger(null)}>Close</button>}>
+          <p className="muted" style={{ marginTop: 0 }}>
+            {ledger.phone || "No phone"}{ledger.village ? ` · ${ledger.village}` : ""} · Outstanding{" "}
+            <strong style={{ color: Number(ledger.outstanding_balance) > 0 ? "var(--danger)" : "inherit" }}>{inr(ledger.outstanding_balance)}</strong>
+          </p>
+          <h3 style={{ fontSize: 14, margin: "4px 0 8px" }}>Khata collections</h3>
+          <Table
+            columns={[
+              { key: "paid_at", label: "Date", render: (r) => String(r.paid_at || "").replace("T", " ").slice(0, 16) },
+              { key: "mode", label: "Mode" },
+              { key: "note", label: "Note", render: (r) => r.note || "—" },
+              { key: "amount", label: "Amount", num: true, render: (r) => inr(r.amount) },
+            ]}
+            rows={ledger.payments || []}
+            empty="No khata collections recorded yet"
+            scroll={false}
+          />
+          <h3 style={{ fontSize: 14, margin: "16px 0 8px" }}>Invoices</h3>
+          <Table
+            columns={[
+              { key: "invoice_no", label: "Invoice #" },
+              { key: "date", label: "Date" },
+              { key: "total", label: "Total", num: true, render: (r) => inr(r.total) },
+              { key: "outstanding", label: "Balance", num: true, render: (r) => Number(r.outstanding) > 0 ? inr(r.outstanding) : "Paid" },
+            ]}
+            rows={ledger.invoices || []}
+            empty="No invoices for this farmer"
+            pageSize={25}
+          />
         </Modal>
       )}
     </div>

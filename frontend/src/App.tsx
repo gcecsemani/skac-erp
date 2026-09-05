@@ -3,11 +3,11 @@ import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom"
 import {
   LayoutDashboard, ShoppingCart, ReceiptText, Undo2, Users, Package,
   Boxes, ArrowLeftRight, Truck, Landmark, BarChart3, Sparkles, Brain,
-  ShieldCheck, UserCog, Menu, Leaf, LogOut, Building2, Wallet, Settings2, MapPin,
+  ShieldCheck, UserCog, Menu, Leaf, LogOut, Building2, Wallet, Settings2, MapPin, Banknote,
 } from "lucide-react";
 import { useAuth } from "./auth";
 import { prefetchMasters } from "./offline";
-import { canAccessPath, homePath, isOwner } from "./roles";
+import { canAccessPath, homePath } from "./roles";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import POS from "./pages/POS";
@@ -26,6 +26,7 @@ import Compliance from "./pages/Compliance";
 import Admin from "./pages/Admin";
 import Branches from "./pages/Branches";
 import Expenses from "./pages/Expenses";
+import DayClose from "./pages/DayClose";
 import FieldVisits from "./pages/FieldVisits";
 import Config from "./pages/Config";
 
@@ -50,6 +51,7 @@ const NAV = [
   { group: "Purchasing", items: [{ to: "/purchasing", label: "Vendors & POs", icon: Truck, ownerOnly: true }] },
   {
     group: "Finance", items: [
+      { to: "/day-close", label: "Day close", icon: Banknote },
       { to: "/expenses", label: "Expenses", icon: Wallet },
       { to: "/accounting", label: "Accounting", icon: Landmark, ownerOnly: true },
       { to: "/reports", label: "Reports", icon: BarChart3, ownerOnly: true },
@@ -75,7 +77,7 @@ const TITLES: Record<string, string> = {
   "/": "Consolidated Dashboard", "/pos": "POS Billing", "/invoices": "Invoices",
   "/returns": "Sales Returns", "/customers": "Farmers / Customers", "/field-visits": "Field visits", "/products": "Products",
   "/stock": "Stock on Hand", "/transfers": "Stock Transfers", "/purchasing": "Purchasing",
-  "/accounting": "Accounting & Finance", "/expenses": "Expenses", "/reports": "Reports & Analytics",
+  "/accounting": "Accounting & Finance", "/expenses": "Expenses", "/day-close": "Day close", "/reports": "Reports & Analytics",
   "/assistant": "AI Business Assistant", "/purchase-ai": "AI Purchase Recommendations",
   "/compliance": "Compliance & Statutory", "/admin": "Users & Audit Trail", "/branches": "Branches",
   "/config": "Master data",
@@ -83,7 +85,6 @@ const TITLES: Record<string, string> = {
 
 function Sidebar({ open, close }: { open: boolean; close: () => void }) {
   const { user, logout } = useAuth();
-  const owner = isOwner(user);
   const initials = (user?.full_name || "U").split(" ").map((s: string) => s[0]).slice(0, 2).join("");
   return (
     <>
@@ -97,7 +98,7 @@ function Sidebar({ open, close }: { open: boolean; close: () => void }) {
           </div>
         </div>
         {NAV.map((g) => {
-          const items = g.items.filter((it) => owner || !it.ownerOnly);
+          const items = g.items.filter((it) => canAccessPath(user, it.to));
           if (items.length === 0) return null;
           return (
             <div className="nav-group" key={g.group}>
@@ -169,6 +170,7 @@ export default function App() {
             <Route path="/transfers" element={<Guard path="/transfers"><Transfers /></Guard>} />
             <Route path="/purchasing" element={<Guard path="/purchasing"><Purchasing /></Guard>} />
             <Route path="/expenses" element={<Guard path="/expenses"><Expenses /></Guard>} />
+            <Route path="/day-close" element={<Guard path="/day-close"><DayClose /></Guard>} />
             <Route path="/accounting" element={<Guard path="/accounting"><Accounting /></Guard>} />
             <Route path="/reports" element={<Guard path="/reports"><Reports /></Guard>} />
             <Route path="/assistant" element={<Guard path="/assistant"><Assistant /></Guard>} />

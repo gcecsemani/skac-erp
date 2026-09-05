@@ -59,7 +59,7 @@ def list_expenses(
     start: date | None = None,
     end: date | None = None,
     category: str | None = None,
-    limit: int = Query(100, ge=1, le=300),
+    limit: int = Query(200, ge=1, le=1000),
     current: CurrentUser = Depends(require_permission(rbac.P_EXPENSE_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[dict]:

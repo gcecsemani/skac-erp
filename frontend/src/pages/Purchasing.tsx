@@ -48,7 +48,8 @@ export default function Purchasing() {
       api.grns((gq !== undefined ? gq : grnQ) || undefined),
       api.purchaseReturns((rq !== undefined ? rq : returnQ) || undefined),
     ]);
-    setVendors(v); setOrders(o); setGrns(g); setReturns(r);
+    setVendors([...v].sort((a, b) => Number(b.outstanding_balance || 0) - Number(a.outstanding_balance || 0) || String(a.name).localeCompare(String(b.name))));
+    setOrders(o); setGrns(g); setReturns(r);
   };
   useEffect(() => {
     Promise.all([loadAll(), api.branches().then(setBranches)])
@@ -263,8 +264,10 @@ export default function Purchasing() {
                 </div>
               ) },
             ]}
-            rows={vendors} empty="No vendors"
-          />
+          rows={vendors}
+          empty="No vendors"
+          pageSize={50}
+        />
         </Card>
       )}
 
@@ -283,6 +286,7 @@ export default function Purchasing() {
               { key: "expected_total", label: "Value", num: true, render: (r) => inr(r.expected_total) },
             ]}
             rows={orders} empty="No purchase orders"
+            pageSize={50}
           />
         </Card>
       )}
@@ -309,6 +313,7 @@ export default function Purchasing() {
               ) },
             ]}
             rows={grns} empty="No goods receipts"
+            pageSize={50}
           />
         </Card>
       )}
@@ -337,6 +342,7 @@ export default function Purchasing() {
             ]}
             rows={returns}
             empty="No purchase returns yet"
+            pageSize={50}
           />
         </Card>
       )}

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from app.models.enums import InvoiceStatus, PaymentMode, TaxType
@@ -94,9 +96,24 @@ class AskRequest(BaseModel):
     branch_id: int | None = None
 
 
+class ReportColumn(BaseModel):
+    key: str
+    label: str
+    money: bool = False
+    num: bool = False
+
+
+class ReportPayload(BaseModel):
+    title: str
+    columns: list[ReportColumn]
+    rows: list[dict[str, Any]]
+    row_count: int = 0
+
+
 class AskResponse(BaseModel):
     question: str
     tool: str
     arguments: dict
     data: dict
     answer: str
+    report: ReportPayload | None = None

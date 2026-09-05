@@ -20,12 +20,14 @@ export default function Returns() {
   useEffect(() => { load(); }, []);
 
   const filtered = useMemo(
-    () => (rows || []).filter((r) => matchesQuery(q, r.note_no, r.date, r.invoice_id, r.invoice_no, r.reason, r.total)),
+    () => (rows || []).filter((r) => matchesQuery(q, r.note_no, r.date, r.invoice_id, r.invoice_no, r.reason, r.total, r.customer_name, r.customer_village, r.customer_phone)),
     [rows, q],
   );
 
   const searchInvoices = (needle: string) => {
-    api.findInvoices(needle.trim()).then(setInvoiceHits).catch(() => setInvoiceHits([]));
+    const q = needle.trim();
+    if (q.length === 1) return;
+    api.findInvoices(q).then(setInvoiceHits).catch(() => setInvoiceHits([]));
   };
 
   const pickInvoice = (id: number | "") => {
@@ -70,7 +72,9 @@ export default function Returns() {
           <div className="row">
             <ExportButtons title="Sales returns" columns={[
               { key: "note_no", label: "Credit Note #" }, { key: "date", label: "Date" },
-              { key: "invoice_no", label: "Invoice #" }, { key: "reason", label: "Reason" },
+              { key: "invoice_no", label: "Invoice #" }, { key: "customer_name", label: "Farmer" },
+              { key: "customer_village", label: "Village" }, { key: "customer_phone", label: "Phone" },
+              { key: "reason", label: "Reason" },
               { key: "total", label: "Amount", num: true, money: true },
             ]} rows={filtered} />
             <button className="btn btn-primary" onClick={() => { setOpen(true); setErr(""); setInvoice(null); setInvoiceId(""); setQty({}); setReason(""); }}><Plus size={16} /> New Credit Note</button>
@@ -86,11 +90,15 @@ export default function Returns() {
             { key: "note_no", label: "Credit Note #" },
             { key: "date", label: "Date" },
             { key: "invoice_no", label: "Invoice #", render: (r: any) => r.invoice_no || `#${r.invoice_id}` },
+            { key: "customer_name", label: "Farmer", render: (r: any) => r.customer_name || "—" },
+            { key: "customer_village", label: "Village", render: (r: any) => r.customer_village || "—" },
+            { key: "customer_phone", label: "Phone", render: (r: any) => r.customer_phone || "—" },
             { key: "reason", label: "Reason" },
             { key: "total", label: "Amount", num: true, render: (r) => <strong>{inr(r.total)}</strong> },
           ]}
           rows={filtered}
           empty={rows.length ? "No credit notes match the search" : "No credit notes yet"}
+          pageSize={50}
         />
       </Card>
 
@@ -116,7 +124,10 @@ export default function Returns() {
           {err && <div className="error">{err}</div>}
           {invoice && (
             <p className="muted" style={{ marginTop: -8 }}>
-              {invoice.invoice_date} · {invoice.payment_mode} · {inr(invoice.grand_total)}
+              {invoice.invoice_date} · {invoice.customer_name || "Walk-in"}
+              {invoice.customer_village ? ` · ${invoice.customer_village}` : ""}
+              {invoice.customer_phone ? ` · ${invoice.customer_phone}` : ""}
+              {" · "}{invoice.payment_mode} · {inr(invoice.grand_total)}
               {invoice.payment_mode !== "cash" ? " · Credit bill — return posts a credit note against this invoice" : ""}
             </p>
           )}

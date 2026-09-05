@@ -111,6 +111,7 @@ export default function Stock() {
           ]}
           rows={filtered}
           empty={rows.length ? "No stock matches the filters" : "No stock recorded"}
+          pageSize={50}
         />
       </Card>
 

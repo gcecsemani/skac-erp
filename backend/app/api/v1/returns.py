@@ -4,9 +4,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core import rbac
@@ -38,24 +38,41 @@ class CreditNoteIn(BaseModel):
 
 @router.get("")
 def list_credit_notes(
-    current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)
+    search: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[dict]:
-    stmt = select(CreditNote).where(
-        CreditNote.organization_id == current.organization_id
-    ).order_by(CreditNote.id.desc())
+    stmt = (
+        select(CreditNote, Invoice.invoice_no, Customer.name, Customer.village, Customer.phone)
+        .outerjoin(Invoice, Invoice.id == CreditNote.invoice_id)
+        .outerjoin(Customer, Customer.id == CreditNote.customer_id)
+        .where(CreditNote.organization_id == current.organization_id)
+        .order_by(CreditNote.id.desc())
+    )
     if not current.sees_all_branches:
         stmt = stmt.where(CreditNote.branch_id.in_(current.branch_ids or [-1]))
-    notes = db.scalars(stmt).all()
-    invoice_ids = [c.invoice_id for c in notes]
-    invoice_nos: dict[int, str] = {}
-    if invoice_ids:
-        rows = db.execute(select(Invoice.id, Invoice.invoice_no).where(Invoice.id.in_(invoice_ids))).all()
-        invoice_nos = {row.id: row.invoice_no for row in rows}
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            CreditNote.note_no.ilike(like),
+            CreditNote.reason.ilike(like),
+            Invoice.invoice_no.ilike(like),
+            Customer.name.ilike(like),
+            Customer.phone.ilike(like),
+            Customer.village.ilike(like),
+        ))
+    rows = db.execute(stmt.limit(limit)).all()
     return [
-        {"id": c.id, "note_no": c.note_no, "invoice_id": c.invoice_id,
-         "invoice_no": invoice_nos.get(c.invoice_id),
-         "date": c.note_date.isoformat(), "reason": c.reason, "total": float(c.total)}
-        for c in notes
+        {
+            "id": c.id, "note_no": c.note_no, "invoice_id": c.invoice_id,
+            "invoice_no": invoice_no,
+            "customer_name": farmer_name,
+            "customer_village": village,
+            "customer_phone": phone,
+            "date": c.note_date.isoformat(), "reason": c.reason, "total": float(c.total),
+        }
+        for c, invoice_no, farmer_name, village, phone in rows
     ]
 
 

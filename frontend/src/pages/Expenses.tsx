@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Plus, ReceiptIndianRupee } from "lucide-react";
 import { api } from "../api";
-import { inr } from "../format";
-import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
+import { inr, matchesQuery } from "../format";
+import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, Table, BranchSelect } from "../components/ui";
 import { PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
 import { useAuth } from "../auth";
@@ -27,6 +27,7 @@ export default function Expenses() {
   const [start, setStart] = useState(monthStart);
   const [end, setEnd] = useState(today);
   const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
   const [form, setForm] = useState<any>({});
   const [err, setErr] = useState("");
 
@@ -72,7 +73,8 @@ export default function Expenses() {
   };
 
   if (!rows) return <Loading />;
-  const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
+  const filtered = rows.filter((r) => matchesQuery(q, r.payee, r.note, r.category, r.branch_name, r.amount, r.mode));
+  const total = filtered.reduce((s, r) => s + Number(r.amount || 0), 0);
 
   return (
     <div>
@@ -92,6 +94,7 @@ export default function Expenses() {
       />
       <Card title="Filters" icon={<ReceiptIndianRupee size={16} />}>
         <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
+          <SearchInput value={q} onChange={setQ} placeholder="Search payee, note, category…" />
           <BranchSelect value={branchId} onChange={setBranchId} branches={branches} allowAll={allBranches} />
           <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: "auto" }}>
             <option value="">All categories</option>
@@ -111,8 +114,9 @@ export default function Expenses() {
             { key: "note", label: "Note", render: (r) => r.note || "—" },
             { key: "amount", label: "Amount", num: true, render: (r) => <strong>{inr(r.amount)}</strong> },
           ]}
-          rows={rows}
+          rows={filtered}
           empty="No expenses in this period"
+          pageSize={50}
         />
       </Card>
 

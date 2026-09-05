@@ -120,7 +120,7 @@ def list_visits(
     status: str | None = None,
     branch_id: int | None = None,
     search: str | None = None,
-    limit: int = Query(150, ge=1, le=400),
+    limit: int = Query(200, ge=1, le=1000),
     current: CurrentUser = Depends(require_permission(rbac.P_FIELD_VISIT)),
     db: Session = Depends(get_db),
 ) -> list[dict]:

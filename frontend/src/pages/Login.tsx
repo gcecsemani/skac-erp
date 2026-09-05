@@ -2,11 +2,29 @@ import { useState } from "react";
 import { Leaf, ShieldCheck, Boxes, Sparkles, LogIn } from "lucide-react";
 import { useAuth } from "../auth";
 
+const REMEMBER_KEY = "skac_remember_login";
+
+function loadRemembered() {
+  try {
+    const raw = localStorage.getItem(REMEMBER_KEY);
+    if (!raw) return { email: "", password: "", remember: false };
+    const parsed = JSON.parse(raw);
+    return {
+      email: String(parsed.email || ""),
+      password: String(parsed.password || ""),
+      remember: true,
+    };
+  } catch {
+    return { email: "", password: "", remember: false };
+  }
+}
+
 export default function Login() {
   const { login } = useAuth();
-  const [email, setEmail] = useState("owner@skac.in");
-  const [password, setPassword] = useState("owner123");
-  const [totp, setTotp] = useState("");
+  const saved = loadRemembered();
+  const [email, setEmail] = useState(saved.email);
+  const [password, setPassword] = useState(saved.password);
+  const [remember, setRemember] = useState(saved.remember);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -20,7 +38,9 @@ export default function Login() {
     if (!pw) { setError("Please enter your password."); return; }
     setError(""); setBusy(true);
     try {
-      await login(em, pw, totp || undefined);
+      await login(em, pw);
+      if (remember) localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: em, password: pw }));
+      else localStorage.removeItem(REMEMBER_KEY);
     } catch (err: any) {
       setError(err.message || "Sign in failed. Check your email and password.");
     } finally {
@@ -56,10 +76,10 @@ export default function Login() {
             <label>Password</label>
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </div>
-          <div className="field">
-            <label>2FA code <span className="muted">(owner, if enabled)</span></label>
-            <input value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="optional" />
-          </div>
+          <label className="row" style={{ gap: 8, cursor: "pointer", marginBottom: 14 }}>
+            <input type="checkbox" style={{ width: "auto" }} checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+            Remember username and password
+          </label>
           {error && <div className="error">{error}</div>}
           <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
             <LogIn size={18} /> {busy ? "Signing in…" : "Sign in"}

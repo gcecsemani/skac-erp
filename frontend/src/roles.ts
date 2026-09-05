@@ -9,6 +9,7 @@ export const CASHIER_PATHS = new Set([
   "/returns",
   "/customers",
   "/expenses",
+  "/day-close",
   "/field-visits",
 ]);
 

@@ -18,6 +18,12 @@ const REPORTS = [
   { key: "supplier_outstanding", label: "Supplier outstanding" },
   { key: "gst", label: "GST" },
   { key: "payment_collection", label: "Payment collection" },
+  { key: "vendor_stock", label: "Vendor stock" },
+  { key: "field_visits", label: "Field visits" },
+  { key: "product_profit", label: "Product profit" },
+  { key: "product_loss", label: "Product loss" },
+  { key: "farmer_profit", label: "Farmer profit" },
+  { key: "farmer_loss", label: "Farmer loss" },
 ];
 
 const monthStart = () => {
@@ -102,7 +108,7 @@ export default function Reports() {
                 ))}
               </div>
             )}
-            <Table columns={columns} rows={data?.rows || []} empty="No rows for this period" />
+            <Table columns={columns} rows={data?.rows || []} empty="No rows for this period" pageSize={50} />
           </>
         )}
       </Card>

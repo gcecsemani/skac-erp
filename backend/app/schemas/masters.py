@@ -135,7 +135,13 @@ class CustomerBase(BaseModel):
     credit_limit: Decimal = Decimal("0")
 
 
-class CustomerCreate(CustomerBase):
+class CustomerWrite(CustomerBase):
+    phone: str = Field(min_length=8, max_length=20)
+    village: str = Field(min_length=1, max_length=120)
+    district: str = Field(min_length=1, max_length=120)
+
+
+class CustomerCreate(CustomerWrite):
     pass
 
 

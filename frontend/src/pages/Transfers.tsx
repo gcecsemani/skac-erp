@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { ArrowLeftRight, Check, Eye, Plus, Printer, Trash2, X } from "lucide-react";
 import { api } from "../api";
+import { matchesQuery } from "../format";
 import { printTransferReceipt } from "../print";
-import { Badge, Card, Field, Loading, Modal, PageHeader, SearchSelect, Table } from "../components/ui";
+import { Badge, Card, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
 import * as V from "../validate";
 
 function newLine() {
@@ -18,6 +19,7 @@ export default function Transfers() {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<any>({ from_branch_id: "", to_branch_id: "", notes: "", lines: [newLine()] });
   const [view, setView] = useState<any | null>(null);
+  const [q, setQ] = useState("");
 
   const load = () => api.transfers().then(setRows).catch(() => setRows([]));
   useEffect(() => {
@@ -95,6 +97,10 @@ export default function Transfers() {
   if (!rows) return <Loading />;
   const bname = (id: number) => branches.find((b) => b.id === id)?.name || id;
   const tone = (s: string) => (s === "received" ? "success" : s === "rejected" ? "danger" : "warn");
+  const filtered = rows.filter((r) => matchesQuery(
+    q, r.transfer_no, r.status, r.from_branch, r.to_branch, r.notes,
+    ...(r.items || []).map((i: any) => i.product_name),
+  ));
 
   return (
     <div>
@@ -104,6 +110,9 @@ export default function Transfers() {
         actions={<button className="btn btn-primary" onClick={openNew}><Plus size={16} /> New Transfer</button>}
       />
       <Card>
+        <div className="row mb-16">
+          <SearchInput value={q} onChange={setQ} placeholder="Search transfer #, branch or product…" />
+        </div>
         <Table
           columns={[
             { key: "transfer_no", label: "Transfer #" },
@@ -125,8 +134,9 @@ export default function Transfers() {
               </div>
             ) },
           ]}
-          rows={rows}
-          empty="No transfers yet"
+          rows={filtered}
+          empty={rows.length ? "No transfers match the search" : "No transfers yet"}
+          pageSize={50}
         />
       </Card>
 

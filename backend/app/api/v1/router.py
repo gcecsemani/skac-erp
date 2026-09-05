@@ -9,6 +9,7 @@ from app.api.v1 import (
     branches,
     config,
     customers,
+    day_close,
     expenses,
     field_visits,
     inventory,
@@ -33,6 +34,7 @@ api_router.include_router(purchasing.router)
 api_router.include_router(transfers.router)
 api_router.include_router(accounting.router)
 api_router.include_router(expenses.router)
+api_router.include_router(day_close.router)
 api_router.include_router(field_visits.router)
 api_router.include_router(reports.router)
 api_router.include_router(admin.router)

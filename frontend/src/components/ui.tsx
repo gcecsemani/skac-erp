@@ -1,5 +1,5 @@
 import { CSSProperties, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Inbox, Search, X, FileSpreadsheet, FileText } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, Inbox, Search, X, FileSpreadsheet, FileText } from "lucide-react";
 import { exportExcel, exportPdf, type ExportColumn } from "../export";
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
@@ -55,30 +55,68 @@ export function Empty({ label = "No data yet" }: { label?: string }) {
   return <div className="empty"><Inbox size={30} style={{ marginBottom: 8, opacity: .5 }} /><div>{label}</div></div>;
 }
 
-export function Table({ columns, rows, empty }: {
+const PAGE_SIZES = [25, 50, 100, 200];
+
+export function Table({ columns, rows, empty, pageSize, scroll = true }: {
   columns: { key: string; label: string; num?: boolean; render?: (row: any) => ReactNode }[];
   rows: any[];
   empty?: string;
+  pageSize?: number;
+  scroll?: boolean;
 }) {
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(pageSize || 50);
+  const sig = `${rows?.length ?? 0}:${rows?.[0]?.id ?? ""}:${rows?.[rows.length - 1]?.id ?? ""}`;
+  useEffect(() => { setPage(1); }, [sig, size]);
+  useEffect(() => { if (pageSize) setSize(pageSize); }, [pageSize]);
+
   if (!rows || rows.length === 0) return <Empty label={empty} />;
+
+  const paged = !!pageSize;
+  const total = rows.length;
+  const pageCount = paged ? Math.max(1, Math.ceil(total / size)) : 1;
+  const safePage = Math.min(page, pageCount);
+  const shown = paged ? rows.slice((safePage - 1) * size, safePage * size) : rows;
+
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>{columns.map((c) => <th key={c.key} className={c.num ? "num" : ""}>{c.label}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr key={i}>
-              {columns.map((c) => (
-                <td key={c.key} className={c.num ? "num" : ""}>
-                  {c.render ? c.render(row) : row[c.key]}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div>
+      <div className={`table-wrap${scroll ? " table-scroll" : ""}`}>
+        <table>
+          <thead>
+            <tr>{columns.map((c) => <th key={c.key} className={c.num ? "num" : ""}>{c.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {shown.map((row, i) => (
+              <tr key={row.id ?? `${safePage}-${i}`}>
+                {columns.map((c) => (
+                  <td key={c.key} className={c.num ? "num" : ""}>
+                    {c.render ? c.render(row) : row[c.key]}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {paged && (
+        <div className="table-pager">
+          <span className="muted">
+            {total === 0 ? "0" : `${(safePage - 1) * size + 1}–${Math.min(safePage * size, total)}`} of {total}
+          </span>
+          <select value={size} onChange={(e) => setSize(Number(e.target.value))} style={{ width: "auto" }}>
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} / page</option>)}
+          </select>
+          <div className="row" style={{ gap: 6 }}>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>
+              <ChevronLeft size={15} /> Prev
+            </button>
+            <span className="muted" style={{ minWidth: 72, textAlign: "center" }}>Page {safePage} / {pageCount}</span>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)}>
+              Next <ChevronRight size={15} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -196,6 +234,7 @@ export function SearchSelect({
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<any>(null);
   const box = useRef<HTMLDivElement>(null);
+  const queryTimer = useRef<number | null>(null);
   const fromList = options.find((o) => String(getId(o)) === String(value));
   const selected = fromList || (picked && String(getId(picked)) === String(value) ? picked : null);
   const closedLabel = selected ? getLabel(selected) : (value ? String(value) : "");
@@ -234,9 +273,12 @@ export function SearchSelect({
         disabled={disabled}
         onFocus={() => { if (disabled) return; setOpen(true); setQ(closedLabel); }}
         onChange={(e) => {
-          setQ(e.target.value);
+          const next = e.target.value;
+          setQ(next);
           setOpen(true);
-          onQuery?.(e.target.value);
+          if (!onQuery) return;
+          if (queryTimer.current) window.clearTimeout(queryTimer.current);
+          queryTimer.current = window.setTimeout(() => onQuery(next), 250);
         }}
       />
       {open && !disabled && (

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -86,6 +86,8 @@ def _serialize(db: Session, t: StockTransfer) -> dict:
 
 @router.get("")
 def list_transfers(
+    search: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
     current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> list[dict]:
     stmt = select(StockTransfer).where(
@@ -96,7 +98,12 @@ def list_transfers(
         stmt = stmt.where(
             StockTransfer.from_branch_id.in_(ids) | StockTransfer.to_branch_id.in_(ids)
         )
-    return [_serialize(db, t) for t in db.scalars(stmt).all()]
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(
+            StockTransfer.transfer_no.ilike(like) | StockTransfer.notes.ilike(like)
+        )
+    return [_serialize(db, t) for t in db.scalars(stmt.limit(limit)).all()]
 
 
 @router.post("", status_code=201)

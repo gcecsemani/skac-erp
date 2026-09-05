@@ -168,8 +168,8 @@ export const api = {
     const q = p.toString();
     return get<any[]>(`/products${q ? `?${q}` : ""}`);
   },
-  createProduct: (p: any) => post("/products", p),
-  updateProduct: (id: number, p: any) => put(`/products/${id}`, p),
+  createProduct: (p: any) => post<any>("/products", p),
+  updateProduct: (id: number, p: any) => put<any>(`/products/${id}`, p),
   deleteProduct: (id: number) => del(`/products/${id}`),
   setFavorite: (id: number, is_favorite: boolean) => post<any>(`/products/${id}/favorite`, { is_favorite }),
   customers: (search?: string, limit?: number) => {
@@ -180,7 +180,7 @@ export const api = {
     return get<any[]>(`/customers${q ? `?${q}` : ""}`);
   },
   createCustomer: (c: any) => post<any>("/customers", c),
-  updateCustomer: (id: number, c: any) => put(`/customers/${id}`, c),
+  updateCustomer: (id: number, c: any) => put<any>(`/customers/${id}`, c),
   deleteCustomer: (id: number) => del(`/customers/${id}`),
 
   // inventory
@@ -248,6 +248,15 @@ export const api = {
   expenseCategories: () => get<any[]>("/expenses/categories"),
   createExpense: (e: any) => post("/expenses", e),
 
+  dayClosePreview: (branchId: number, closeDate?: string) => {
+    const p = new URLSearchParams({ branch_id: String(branchId) });
+    if (closeDate) p.set("close_date", closeDate);
+    return get<any>(`/day-close/preview?${p}`);
+  },
+  dayCloses: (branchId?: number) =>
+    get<any[]>(`/day-close${branchId ? `?branch_id=${branchId}` : ""}`),
+  saveDayClose: (body: any) => post<any>("/day-close", body),
+
   // field visits
   fieldVisits: (opts?: { status?: string; branchId?: number; search?: string }) => {
     const p = new URLSearchParams();
@@ -312,6 +321,7 @@ export const api = {
     return get<any>(`/reports/table?${p}`);
   },
   customerPayment: (id: number, p: any) => post<any>(`/customers/${id}/payments`, p),
+  customerLedger: (id: number) => get<any>(`/customers/${id}/ledger`),
   remindCustomer: (id: number, send = true) =>
     post<any>(`/customers/${id}/remind?send=${send}`),
 

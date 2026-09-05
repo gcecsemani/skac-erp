@@ -123,7 +123,7 @@ def list_invoices(
     search: str | None = None,
     payment_mode: PaymentMode | None = None,
     unpaid_only: bool = False,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=2000),
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[InvoiceOut]:

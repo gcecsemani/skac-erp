@@ -8,12 +8,14 @@ export function LocationFields({
   onChange,
   bundle,
   ready = true,
+  required = false,
 }: {
   district: string;
   village: string;
   onChange: (next: { district?: string; village?: string }) => void;
   bundle: ConfigBundle;
   ready?: boolean;
+  required?: boolean;
 }) {
   const districts = bundle.districts || [];
   const selected = districts.find((d) => d.name === district);
@@ -30,7 +32,7 @@ export function LocationFields({
 
   return (
     <>
-      <Field label="District">
+      <Field label="District" required={required}>
         <SearchSelect
           value={district}
           options={districtOptions}
@@ -42,7 +44,7 @@ export function LocationFields({
           onChange={(name) => onChange({ district: String(name || ""), village: "" })}
         />
       </Field>
-      <Field label="Village">
+      <Field label="Village" required={required}>
         <SearchSelect
           value={village}
           options={villageOptions}

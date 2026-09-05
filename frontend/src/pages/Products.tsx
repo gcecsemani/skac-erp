@@ -13,7 +13,6 @@ const empty = {
   gst_rate: "5", mrp: "", purchase_price: "", sale_price: "", reorder_level: "",
   npk_n: "", npk_p: "", npk_k: "", toxicity_class: "", germination_pct: "", seed_lot: "",
 };
-const LIST_CAP = 200;
 
 export default function Products() {
   const { bundle } = useConfigBundle();
@@ -35,7 +34,6 @@ export default function Products() {
       .sort((a, b) => Number(!!b.is_favorite) - Number(!!a.is_favorite) || String(a.name).localeCompare(String(b.name))),
     [rows, q, cat],
   );
-  const shown = filtered.slice(0, LIST_CAP);
 
   const toggleFav = async (r: any) => {
     const next = !r.is_favorite;
@@ -128,11 +126,6 @@ export default function Products() {
             <input placeholder="Search name, SKU or barcode…" value={q} onChange={(e) => setQ(e.target.value)} style={{ paddingLeft: 36 }} />
           </div>
         </div>
-        {filtered.length > LIST_CAP && (
-          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-            Showing {LIST_CAP} of {filtered.length} matching products — keep typing to narrow the list
-          </p>
-        )}
         <Table
           columns={[
             { key: "fav", label: "", render: (r) => (
@@ -155,8 +148,9 @@ export default function Products() {
               </div>
             ) },
           ]}
-          rows={shown}
+          rows={filtered}
           empty="No products"
+          pageSize={50}
         />
       </Card>
 

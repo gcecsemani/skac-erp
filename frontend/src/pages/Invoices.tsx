@@ -63,7 +63,8 @@ export default function Invoices() {
         subtitle="Finalized GST tax invoices — view only. Corrections go through Sales Returns."
         actions={<ExportButtons title="Invoices" columns={[
           { key: "invoice_no", label: "Invoice #" }, { key: "invoice_date", label: "Date" },
-          { key: "branch_name", label: "Branch" }, { key: "customer_name", label: "Farmer" },
+          { key: "branch_name", label: "Branch" },           { key: "customer_name", label: "Farmer" },
+          { key: "customer_village", label: "Village" }, { key: "customer_phone", label: "Phone" },
           { key: "payment_mode", label: "Payment" },
           { key: "grand_total", label: "Total", num: true, money: true },
           { key: "amount_paid", label: "Paid", num: true, money: true },
@@ -96,11 +97,13 @@ export default function Invoices() {
             <input type="checkbox" style={{ width: "auto" }} checked={unpaidOnly} onChange={(e) => setUnpaidOnly(e.target.checked)} />
             Unpaid only
           </label>
-          <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ width: "auto" }}>
-            <option value={25}>25 rows</option>
-            <option value={50}>50 rows</option>
-            <option value={100}>100 rows</option>
-            <option value={200}>200 rows</option>
+          <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ width: "auto" }} title="How many invoices to load from the server">
+            <option value={25}>Load 25</option>
+            <option value={50}>Load 50</option>
+            <option value={100}>Load 100</option>
+            <option value={200}>Load 200</option>
+            <option value={500}>Load 500</option>
+            <option value={1000}>Load 1000</option>
           </select>
         </div>
         <Table
@@ -109,6 +112,8 @@ export default function Invoices() {
             { key: "invoice_date", label: "Date" },
             { key: "branch_name", label: "Branch", render: (r) => r.branch_name || "—" },
             { key: "customer_name", label: "Farmer", render: (r) => r.customer_name || <span className="muted">Walk-in</span> },
+            { key: "customer_village", label: "Village", render: (r) => r.customer_village || "—" },
+            { key: "customer_phone", label: "Phone", render: (r) => r.customer_phone || "—" },
             { key: "payment_mode", label: "Payment", render: (r) => <span style={{ textTransform: "capitalize" }}>{r.payment_mode}</span> },
             { key: "status", label: "Status", render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge> },
             { key: "discount_total", label: "Discount", num: true, render: (r) => Number(r.discount_total) > 0 ? inr(r.discount_total) : "—" },
@@ -127,6 +132,7 @@ export default function Invoices() {
           ]}
           rows={rows}
           empty="No invoices in this period"
+          pageSize={50}
         />
       </Card>
 
@@ -136,7 +142,11 @@ export default function Invoices() {
           <div className="row mb-16" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
             <div><div className="muted">Date</div><strong>{sel.invoice_date}</strong></div>
             <div><div className="muted">Branch</div><strong>{sel.branch_name || "—"}</strong></div>
-            <div><div className="muted">Farmer</div><strong>{sel.customer_name || "Walk-in"}</strong></div>
+            <div><div className="muted">Farmer</div><strong>{sel.customer_name || "Walk-in"}</strong>
+              {(sel.customer_village || sel.customer_phone) && (
+                <div className="muted" style={{ fontSize: 12 }}>{[sel.customer_village, sel.customer_phone].filter(Boolean).join(" · ")}</div>
+              )}
+            </div>
             <div><div className="muted">Payment</div><strong style={{ textTransform: "capitalize" }}>{sel.payment_mode}</strong></div>
             <div><div className="muted">Discount</div><strong>{inr(sel.discount_total)}</strong></div>
             <div><div className="muted">Total</div><strong>{inr(sel.grand_total)}</strong></div>

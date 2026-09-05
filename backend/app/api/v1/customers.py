@@ -17,7 +17,7 @@ from app.models.customer import Customer, CustomerPayment
 from app.models.enums import InvoiceStatus
 from app.models.sales import Invoice
 from app.models.organization import Organization
-from app.schemas.masters import CustomerBase, CustomerCreate, CustomerOut
+from app.schemas.masters import CustomerCreate, CustomerOut, CustomerWrite
 from app.services import accounting, whatsapp
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -104,7 +104,7 @@ def _get_owned_customer(db: Session, customer_id: int, org_id: int) -> Customer:
 @router.put("/{customer_id}", response_model=CustomerOut)
 def update_customer(
     customer_id: int,
-    payload: CustomerBase,
+    payload: CustomerWrite,
     current: CurrentUser = Depends(require_permission(rbac.P_CUSTOMER_MANAGE)),
     db: Session = Depends(get_db),
 ) -> Customer:
@@ -230,6 +230,56 @@ def record_customer_payment(
         "customer_id": customer.id,
         "amount": float(amount),
         "outstanding_balance": float(customer.outstanding_balance),
+    }
+
+
+@router.get("/{customer_id}/ledger")
+def customer_ledger(
+    customer_id: int,
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Khata collections and invoice history for a farmer."""
+    customer = _get_owned_customer(db, customer_id, current.organization_id)
+    payments = db.scalars(
+        select(CustomerPayment)
+        .where(CustomerPayment.customer_id == customer.id)
+        .order_by(CustomerPayment.paid_at.desc(), CustomerPayment.id.desc())
+    ).all()
+    invoices = db.scalars(
+        select(Invoice)
+        .where(
+            Invoice.organization_id == current.organization_id,
+            Invoice.customer_id == customer.id,
+            Invoice.status == InvoiceStatus.finalized,
+        )
+        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+    ).all()
+    return {
+        "id": customer.id,
+        "name": customer.name,
+        "phone": customer.phone,
+        "village": customer.village,
+        "outstanding_balance": float(customer.outstanding_balance or 0),
+        "payments": [
+            {
+                "id": p.id,
+                "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+                "amount": float(p.amount),
+                "mode": p.mode,
+                "note": p.note,
+            }
+            for p in payments
+        ],
+        "invoices": [
+            {
+                "invoice_no": i.invoice_no,
+                "date": i.invoice_date.isoformat(),
+                "total": float(i.grand_total),
+                "outstanding": float(i.grand_total - i.amount_paid),
+            }
+            for i in invoices[:200]
+        ],
     }
 
 

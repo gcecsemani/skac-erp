@@ -3,6 +3,7 @@ from app.models.accounting import JournalEntry, JournalLine, LedgerAccount
 from app.models.config import ConfigItem
 from app.models.audit import AuditLog
 from app.models.customer import Customer, CustomerPayment
+from app.models.day_close import DayClose
 from app.models.expense import Expense
 from app.models.field_visit import FieldVisit, FieldVisitPhoto
 from app.models.enums import (
@@ -40,6 +41,7 @@ __all__ = [
     "AuditLog",
     "Customer",
     "CustomerPayment",
+    "DayClose",
     "Expense",
     "FieldVisit",
     "FieldVisitPhoto",

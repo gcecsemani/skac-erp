@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer, CustomerPayment
 from app.models.enums import InvoiceStatus, MovementType
 from app.models.expense import Expense
+from app.models.field_visit import FieldVisit
 from app.models.inventory import Batch, Stock, StockMovement
 from app.models.organization import Branch
 from app.models.product import Product
 from app.models.purchase import GRN, GRNItem
 from app.models.sales import Invoice, InvoiceItem
+from app.models.user import User
 from app.models.vendor import Vendor
 
 CATALOG = [
@@ -34,6 +36,12 @@ CATALOG = [
     {"key": "supplier_outstanding", "label": "Supplier outstanding", "needs_dates": False},
     {"key": "gst", "label": "GST report", "needs_dates": True},
     {"key": "payment_collection", "label": "Payment collection", "needs_dates": True},
+    {"key": "vendor_stock", "label": "Vendor-wise stock", "needs_dates": False},
+    {"key": "field_visits", "label": "Field visit report", "needs_dates": True},
+    {"key": "product_profit", "label": "Product profit", "needs_dates": True},
+    {"key": "product_loss", "label": "Product loss", "needs_dates": True},
+    {"key": "farmer_profit", "label": "Farmer profit", "needs_dates": True},
+    {"key": "farmer_loss", "label": "Farmer loss", "needs_dates": True},
 ]
 
 
@@ -77,6 +85,12 @@ def run_report(
         "supplier_outstanding": _supplier_outstanding,
         "gst": _gst,
         "payment_collection": _payment_collection,
+        "vendor_stock": _vendor_stock,
+        "field_visits": _field_visits,
+        "product_profit": _product_profit,
+        "product_loss": _product_loss,
+        "farmer_profit": _farmer_profit,
+        "farmer_loss": _farmer_loss,
     }
     fn = builders.get(key)
     if fn is None:
@@ -651,3 +665,211 @@ def _payment_collection(db, org_id, scope, start, end) -> dict:
         "rows": rows,
         "summary": [{"label": "Collected", "value": round(sum(r["amount"] for r in rows), 2), "money": True}],
     }
+
+
+def _vendor_stock(db, org_id, scope, start, end) -> dict:
+    latest = (
+        select(GRNItem.batch_id, func.max(GRNItem.id).label("grn_item_id"))
+        .where(GRNItem.batch_id.is_not(None))
+        .group_by(GRNItem.batch_id)
+        .subquery()
+    )
+    stmt = (
+        select(
+            Vendor.name, Product.name, Product.sku, Batch.batch_no, Branch.name,
+            Stock.quantity, Batch.purchase_price, Batch.expiry_date,
+        )
+        .select_from(Stock)
+        .join(Product, Product.id == Stock.product_id)
+        .join(Batch, Batch.id == Stock.batch_id)
+        .join(Branch, Branch.id == Stock.branch_id)
+        .outerjoin(latest, latest.c.batch_id == Stock.batch_id)
+        .outerjoin(GRNItem, GRNItem.id == latest.c.grn_item_id)
+        .outerjoin(GRN, GRN.id == GRNItem.grn_id)
+        .outerjoin(Vendor, Vendor.id == GRN.vendor_id)
+        .where(Stock.organization_id == org_id, Stock.quantity > 0)
+        .order_by(Vendor.name.asc(), Product.name.asc())
+    )
+    if scope is not None:
+        stmt = stmt.where(Stock.branch_id.in_(scope))
+    rows = []
+    total = 0.0
+    for vendor, product, sku, batch, branch, qty, cost, expiry in db.execute(stmt).all():
+        value = _qty(qty) * _n(cost)
+        total += value
+        rows.append({
+            "vendor": vendor or "Direct / unknown",
+            "product": product,
+            "sku": sku,
+            "batch": batch,
+            "expiry": expiry.isoformat() if expiry else "—",
+            "branch": branch,
+            "qty": _qty(qty),
+            "value": round(value, 2),
+        })
+    return {
+        "columns": [
+            {"key": "vendor", "label": "Vendor"},
+            {"key": "product", "label": "Product"},
+            {"key": "sku", "label": "SKU"},
+            {"key": "batch", "label": "Batch"},
+            {"key": "expiry", "label": "Expiry"},
+            {"key": "branch", "label": "Branch"},
+            {"key": "qty", "label": "Qty", "num": True},
+            {"key": "value", "label": "Value", "num": True, "money": True},
+        ],
+        "rows": rows,
+        "summary": [{"label": "Stock value", "value": round(total, 2), "money": True}],
+    }
+
+
+def _field_visits(db, org_id, scope, start, end) -> dict:
+    stmt = (
+        select(FieldVisit, Branch.name, User.full_name)
+        .join(Branch, Branch.id == FieldVisit.branch_id)
+        .join(User, User.id == FieldVisit.visited_by_user_id)
+        .where(
+            FieldVisit.organization_id == org_id,
+            FieldVisit.visit_date >= start,
+            FieldVisit.visit_date <= end,
+        )
+        .order_by(FieldVisit.visit_date.desc(), FieldVisit.id.desc())
+    )
+    if scope is not None:
+        stmt = stmt.where(FieldVisit.branch_id.in_(scope))
+    rows = [
+        {
+            "visit_no": v.visit_no,
+            "date": v.visit_date.isoformat(),
+            "farmer": v.farmer_name,
+            "phone": v.farmer_phone or "—",
+            "village": v.village or "—",
+            "staff": staff,
+            "branch": branch,
+            "status": _enum(v.status),
+            "complaint": (v.complaint_notes or "—")[:120],
+        }
+        for v, branch, staff in db.execute(stmt).all()
+    ]
+    return {
+        "columns": [
+            {"key": "visit_no", "label": "Visit #"},
+            {"key": "date", "label": "Date"},
+            {"key": "farmer", "label": "Farmer"},
+            {"key": "phone", "label": "Phone"},
+            {"key": "village", "label": "Village"},
+            {"key": "staff", "label": "Visited by"},
+            {"key": "branch", "label": "Branch"},
+            {"key": "status", "label": "Status"},
+            {"key": "complaint", "label": "Complaint"},
+        ],
+        "rows": rows,
+        "summary": [{"label": "Visits", "value": len(rows)}],
+    }
+
+
+def _product_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
+    stmt = (
+        select(
+            Product.name, Product.sku,
+            func.coalesce(func.sum(InvoiceItem.quantity), 0),
+            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
+            func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0),
+        )
+        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+        .join(Product, Product.id == InvoiceItem.product_id)
+    )
+    stmt = _inv_filter(stmt, org_id, scope, start, end)
+    stmt = stmt.group_by(Product.id, Product.name, Product.sku)
+    rows = []
+    for name, sku, qty, taxable, cogs in db.execute(stmt).all():
+        profit = _n(taxable) - _n(cogs)
+        margin = round(profit / _n(taxable) * 100, 1) if _n(taxable) else 0
+        rows.append({
+            "product": name,
+            "sku": sku or "—",
+            "qty": _qty(qty),
+            "sales": _n(taxable),
+            "cost": _n(cogs),
+            "profit": round(profit, 2),
+            "margin_pct": margin,
+        })
+    rows.sort(key=lambda r: r["profit"], reverse=not lowest)
+    profit_sum = round(sum(r["profit"] for r in rows), 2)
+    return {
+        "columns": [
+            {"key": "product", "label": "Product"},
+            {"key": "sku", "label": "SKU"},
+            {"key": "qty", "label": "Qty sold", "num": True},
+            {"key": "sales", "label": "Sales (excl. GST)", "num": True, "money": True},
+            {"key": "cost", "label": "Cost", "num": True, "money": True},
+            {"key": "profit", "label": "Profit / (loss)", "num": True, "money": True},
+            {"key": "margin_pct", "label": "Margin %", "num": True},
+        ],
+        "rows": rows,
+        "summary": [{"label": "Profit", "value": profit_sum, "money": True}],
+    }
+
+
+def _product_profit(db, org_id, scope, start, end) -> dict:
+    return _product_margins(db, org_id, scope, start, end, lowest=False)
+
+
+def _product_loss(db, org_id, scope, start, end) -> dict:
+    data = _product_margins(db, org_id, scope, start, end, lowest=True)
+    data["rows"] = [r for r in data["rows"] if r["profit"] <= 0] or data["rows"][:25]
+    data["summary"] = [{"label": "Profit / (loss)", "value": round(sum(r["profit"] for r in data["rows"]), 2), "money": True}]
+    return data
+
+
+def _farmer_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
+    stmt = (
+        select(
+            Customer.id, Customer.name, Customer.village, Customer.phone,
+            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
+            func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0),
+            func.count(func.distinct(Invoice.id)),
+        )
+        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+        .join(Product, Product.id == InvoiceItem.product_id)
+        .outerjoin(Customer, Customer.id == Invoice.customer_id)
+    )
+    stmt = _inv_filter(stmt, org_id, scope, start, end)
+    stmt = stmt.group_by(Customer.id, Customer.name, Customer.village, Customer.phone)
+    rows = []
+    for cid, name, village, phone, taxable, cogs, bills in db.execute(stmt).all():
+        profit = _n(taxable) - _n(cogs)
+        rows.append({
+            "farmer": name or "Walk-in",
+            "village": village or "—",
+            "phone": phone or "—",
+            "bills": int(bills),
+            "sales": _n(taxable),
+            "cost": _n(cogs),
+            "profit": round(profit, 2),
+        })
+    rows.sort(key=lambda r: r["profit"], reverse=not lowest)
+    return {
+        "columns": [
+            {"key": "farmer", "label": "Farmer"},
+            {"key": "village", "label": "Village"},
+            {"key": "phone", "label": "Phone"},
+            {"key": "bills", "label": "Bills", "num": True},
+            {"key": "sales", "label": "Sales (excl. GST)", "num": True, "money": True},
+            {"key": "cost", "label": "Cost", "num": True, "money": True},
+            {"key": "profit", "label": "Profit / (loss)", "num": True, "money": True},
+        ],
+        "rows": rows,
+        "summary": [{"label": "Profit", "value": round(sum(r["profit"] for r in rows), 2), "money": True}],
+    }
+
+
+def _farmer_profit(db, org_id, scope, start, end) -> dict:
+    return _farmer_margins(db, org_id, scope, start, end, lowest=False)
+
+
+def _farmer_loss(db, org_id, scope, start, end) -> dict:
+    data = _farmer_margins(db, org_id, scope, start, end, lowest=True)
+    data["rows"] = [r for r in data["rows"] if r["profit"] <= 0] or data["rows"][:25]
+    data["summary"] = [{"label": "Profit / (loss)", "value": round(sum(r["profit"] for r in data["rows"]), 2), "money": True}]
+    return data

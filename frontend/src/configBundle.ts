@@ -107,8 +107,12 @@ export function modesFor(bundle: ConfigBundle, use: string): { code: string; nam
     const uses = m.extra?.use_in;
     return !Array.isArray(uses) || uses.includes(use);
   });
-  if (list.length) return list.map((m) => ({ code: m.code, name: m.name }));
-  return FALLBACK_MODES[use] || FALLBACK_MODES.pos;
+  const mapped = list.length
+    ? list.map((m) => ({ code: m.code, name: m.name }))
+    : (FALLBACK_MODES[use] || FALLBACK_MODES.pos);
+  if (use !== "pos") return mapped;
+  const rank = (code: string) => (code === "cash" ? 0 : code === "credit" ? 1 : 2);
+  return [...mapped].sort((a, b) => rank(a.code) - rank(b.code) || a.name.localeCompare(b.name));
 }
 
 export function gstValue(item: ConfigItem): string {

@@ -2,7 +2,7 @@
 
 Only two roles are used:
 - owner: full access across every branch
-- cashier: POS, invoices, sales returns, farmers, expenses, and field visits for assigned branch(es)
+- cashier: POS, invoices, sales returns, farmers, expenses, day close, and field visits for assigned branch(es)
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ ROLE_CASHIER = "cashier"
 
 DEFAULT_ROLES: list[dict] = [
     {"key": ROLE_OWNER, "name": "Owner", "description": "Full access, all branches"},
-    {"key": ROLE_CASHIER, "name": "Cashier", "description": "POS, invoices, returns, farmers, expenses and field visits for assigned branch"},
+    {"key": ROLE_CASHIER, "name": "Cashier", "description": "POS, invoices, returns, farmers, expenses, day close and field visits for assigned branch"},
 ]
 
 ALLOWED_ROLE_KEYS = {ROLE_OWNER, ROLE_CASHIER}

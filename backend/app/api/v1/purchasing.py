@@ -175,7 +175,7 @@ def list_vendors(
             Vendor.gstin.ilike(like),
             Vendor.phone.ilike(like),
         ))
-    rows = db.scalars(stmt.order_by(Vendor.name.asc()).limit(limit)).all()
+    rows = db.scalars(stmt.order_by(Vendor.outstanding_balance.desc(), Vendor.name.asc()).limit(limit)).all()
     return [
         {"id": v.id, "name": v.name, "gstin": v.gstin, "phone": v.phone,
          "email": v.email, "outstanding_balance": float(v.outstanding_balance)}

@@ -37,6 +37,8 @@ export default function POS() {
   const [addFarmer, setAddFarmer] = useState<any | null>(null);
   const [farmerErr, setFarmerErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshingFarmers, setRefreshingFarmers] = useState(false);
+  const farmerBox = useRef<HTMLDivElement>(null);
 
   const [discMode, setDiscMode] = useState<"inr" | "pct">("inr");
   const [billDiscount, setBillDiscount] = useState("");
@@ -67,18 +69,19 @@ export default function POS() {
     getCachedCustomers().then((cached) => { if (cached.length) setFarmerBook(cached); }).catch(() => {});
     refreshCustomers().then(setFarmerBook).catch(() => {});
     const on = () => setOnline(true), off = () => setOnline(false);
-    const onFocus = () => { if (navigator.onLine) loadProducts(); };
     window.addEventListener("online", on); window.addEventListener("offline", off);
-    window.addEventListener("focus", onFocus);
     pendingCount().then(setPending);
-    const tick = setInterval(() => {
-      if (document.visibilityState === "visible" && navigator.onLine) loadProducts();
-    }, 30000);
     return () => {
       window.removeEventListener("online", on); window.removeEventListener("offline", off);
-      window.removeEventListener("focus", onFocus);
-      clearInterval(tick);
     };
+  }, []);
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (farmerBox.current && !farmerBox.current.contains(e.target as Node)) setCustOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
   }, []);
 
   useEffect(() => {
@@ -90,7 +93,12 @@ export default function POS() {
     const rows = products.filter((p) => !q || p.name.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q) || p.barcode?.toLowerCase().includes(q));
     return rows.sort((a, b) => Number(!!b.is_favorite) - Number(!!a.is_favorite) || String(a.name).localeCompare(String(b.name)));
   }, [products, search]);
-  const filtered = filteredAll.slice(0, POS_TILE_CAP);
+  const favorites = useMemo(
+    () => products.filter((p) => p.is_favorite).sort((a, b) => String(a.name).localeCompare(String(b.name))),
+    [products],
+  );
+  const searching = search.trim().length > 0;
+  const filtered = searching ? filteredAll.slice(0, POS_TILE_CAP) : favorites;
 
   const farmerHits = useMemo(() => {
     const q = custQuery.trim();
@@ -116,6 +124,18 @@ export default function POS() {
     await loadProducts();
     setRefreshing(false);
     setMsg({ text: "Product list refreshed.", ok: true });
+  };
+
+  const refreshFarmerBook = async () => {
+    setRefreshingFarmers(true);
+    try {
+      setFarmerBook(await refreshCustomers());
+      setMsg({ text: "Farmer list refreshed.", ok: true });
+    } catch (e: any) {
+      setMsg({ text: e.message || "Could not refresh farmers.", ok: false });
+    } finally {
+      setRefreshingFarmers(false);
+    }
   };
 
   const stockOf = (p: any): number | null => {
@@ -210,7 +230,9 @@ export default function POS() {
     setFarmerErr("");
     const err = V.firstError(
       V.minLen(addFarmer.name, "Name", 2),
-      V.phone(addFarmer.phone),
+      V.phone(addFarmer.phone, { required: true }),
+      V.required(addFarmer.district, "District"),
+      V.required(addFarmer.village, "Village"),
       V.aadhaar(addFarmer.aadhaar_no),
       addFarmer.credit_limit ? V.nonNegative(addFarmer.credit_limit, "Credit limit") : null,
     );
@@ -312,8 +334,11 @@ export default function POS() {
           <>
             <Badge tone={online ? "success" : "warn"}>{online ? <><Wifi size={13} /> Online</> : <><WifiOff size={13} /> Offline</>}</Badge>
             {pending > 0 && <button className="btn btn-ghost btn-sm" onClick={doSync}><RefreshCw size={15} /> Sync {pending}</button>}
-            <button className="btn btn-ghost btn-sm" onClick={refreshCatalog} title="Reload products added by owner">
+            <button className="btn btn-ghost btn-sm" onClick={refreshCatalog} title="Reload products from server">
               <RefreshCw size={15} className={refreshing ? "spin" : undefined} /> Refresh products
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={refreshFarmerBook} title="Reload farmers added recently">
+              <RefreshCw size={15} className={refreshingFarmers ? "spin" : undefined} /> Refresh farmers
             </button>
             <select value={branchId} disabled={branches.length <= 1} onChange={(e) => setBranchId(Number(e.target.value))} style={{ width: "auto" }}>
               {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -328,11 +353,18 @@ export default function POS() {
             <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
             <input placeholder="Search product or scan barcode…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ paddingLeft: 36 }} />
           </div>
-          {filteredAll.length > POS_TILE_CAP && (
+          {!searching && (
             <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
-              Showing {POS_TILE_CAP} of {filteredAll.length} — type to find a product
+              Favorites only — star a product on the Products page, or type to search the full catalog
+              {favorites.length === 0 ? " (none pinned yet)" : ` · ${favorites.length} pinned`}
             </p>
           )}
+          {searching && filteredAll.length > POS_TILE_CAP && (
+            <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+              Showing {POS_TILE_CAP} of {filteredAll.length} — keep typing to narrow
+            </p>
+          )}
+          <div className="product-panel">
           <div className="product-grid">
             {filtered.map((p) => {
               const stock = stockOf(p);
@@ -356,6 +388,15 @@ export default function POS() {
               </div>
               );
             })}
+          </div>
+          {!searching && favorites.length === 0 && (
+            <p className="muted" style={{ textAlign: "center", padding: "28px 8px" }}>
+              No favorite products yet. Search above, or pin products with the star on the Products page.
+            </p>
+          )}
+          {searching && filtered.length === 0 && (
+            <p className="muted" style={{ textAlign: "center", padding: "28px 8px" }}>No products match “{search.trim()}”.</p>
+          )}
           </div>
         </Card>
 
@@ -410,7 +451,7 @@ export default function POS() {
                 <button className="icon-btn" style={{ width: 30, height: 30 }} onClick={() => selectCustomer(null)}><X size={14} /></button>
               </div>
             ) : (
-              <div style={{ position: "relative" }}>
+              <div ref={farmerBox} style={{ position: "relative" }}>
                 <div className="row" style={{ position: "relative" }}>
                   <User size={16} style={{ position: "absolute", left: 11, color: "#94a3b8" }} />
                   <input
@@ -424,7 +465,7 @@ export default function POS() {
                 {custOpen && (
                   <div style={{ position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0, marginTop: 4, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-lg)", overflow: "hidden" }}>
                     {farmerHits.map((c) => (
-                      <button key={c.id} className="row" onClick={() => selectCustomer(c)}
+                      <button key={c.id} className="row" onMouseDown={(e) => e.preventDefault()} onClick={() => selectCustomer(c)}
                         style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: "9px 12px", cursor: "pointer", justifyContent: "space-between" }}>
                         <span>
                           <strong>{c.name}</strong>{" "}
@@ -501,13 +542,14 @@ export default function POS() {
           {farmerErr && <div className="error">{farmerErr}</div>}
           <div className="grid grid-2">
             <Field label="Name" required><input value={addFarmer.name} onChange={(e) => setAddFarmer({ ...addFarmer, name: e.target.value })} /></Field>
-            <Field label="Phone"><input value={addFarmer.phone} onChange={(e) => setAddFarmer({ ...addFarmer, phone: e.target.value })} /></Field>
+            <Field label="Phone" required><input value={addFarmer.phone} onChange={(e) => setAddFarmer({ ...addFarmer, phone: e.target.value })} /></Field>
             <Field label="Aadhaar (12 digits)"><input value={addFarmer.aadhaar_no} maxLength={12} onChange={(e) => setAddFarmer({ ...addFarmer, aadhaar_no: e.target.value.replace(/\D/g, "").slice(0, 12) })} /></Field>
             <LocationFields
               district={addFarmer.district || ""}
               village={addFarmer.village || ""}
               bundle={bundle}
               ready={ready}
+              required
               onChange={(next) => setAddFarmer((f: any) => ({ ...f, ...next }))}
             />
             <Field label="Credit limit (₹)"><input type="number" value={addFarmer.credit_limit} onChange={(e) => setAddFarmer({ ...addFarmer, credit_limit: e.target.value, credit_allowed: Number(e.target.value) > 0 })} /></Field>

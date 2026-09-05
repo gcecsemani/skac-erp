@@ -248,6 +248,7 @@ export default function FieldVisits() {
           ]}
           rows={rows}
           empty={status === "open" ? "No open field visits waiting at the shop" : "No field visits"}
+          pageSize={50}
         />
       </Card>
 
