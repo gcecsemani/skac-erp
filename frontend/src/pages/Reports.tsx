@@ -44,22 +44,20 @@ export default function Reports() {
 
   useEffect(() => { api.branches().then(setBranches).catch(() => setBranches([])); }, []);
 
-  const load = async (report = key) => {
+  useEffect(() => {
+    const ac = new AbortController();
     setBusy(true); setErr("");
-    try {
-      setData(await api.runReport(report, {
-        branchId: branchId || undefined,
-        start, end,
-      }));
-    } catch (e: any) {
+    api.runReport(key, {
+      branchId: branchId || undefined,
+      start, end,
+      signal: ac.signal,
+    }).then(setData).catch((e) => {
+      if (e?.name === "AbortError") return;
       setData(null);
       setErr(e.message || "Could not load this report.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  useEffect(() => { load(key); }, [key, branchId, start, end]);
+    }).finally(() => setBusy(false));
+    return () => ac.abort();
+  }, [key, branchId, start, end]);
 
   const columns = (data?.columns || []).map((c: any) => ({
     key: c.key,

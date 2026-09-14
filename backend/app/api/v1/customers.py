@@ -51,7 +51,8 @@ def _assert_unique_aadhaar(db: Session, org_id: int, aadhaar: str | None, exclud
 @router.get("", response_model=list[CustomerOut])
 def list_customers(
     search: str | None = None,
-    limit: int = Query(100, ge=1, le=30000),
+    limit: int = Query(80, ge=1, le=2000),
+    outstanding_only: bool = False,
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Customer]:
@@ -68,7 +69,9 @@ def list_customers(
             conds.append(Customer.phone.ilike(f"%{digits}%"))
             conds.append(Customer.aadhaar_no.ilike(f"{digits}%"))
         stmt = stmt.where(or_(*conds))
-    stmt = stmt.order_by(Customer.name.asc()).limit(limit)
+    if outstanding_only:
+        stmt = stmt.where(Customer.outstanding_balance > 0)
+    stmt = stmt.order_by(Customer.outstanding_balance.desc(), Customer.name.asc()).limit(limit)
     return list(db.scalars(stmt).all())
 
 
@@ -241,19 +244,24 @@ def customer_ledger(
 ) -> dict:
     """Khata collections and invoice history for a farmer."""
     customer = _get_owned_customer(db, customer_id, current.organization_id)
-    payments = db.scalars(
-        select(CustomerPayment)
+    payments = db.execute(
+        select(
+            CustomerPayment.id, CustomerPayment.paid_at, CustomerPayment.amount,
+            CustomerPayment.mode, CustomerPayment.note,
+        )
         .where(CustomerPayment.customer_id == customer.id)
         .order_by(CustomerPayment.paid_at.desc(), CustomerPayment.id.desc())
+        .limit(200)
     ).all()
-    invoices = db.scalars(
-        select(Invoice)
+    invoices = db.execute(
+        select(Invoice.invoice_no, Invoice.invoice_date, Invoice.grand_total, Invoice.amount_paid)
         .where(
             Invoice.organization_id == current.organization_id,
             Invoice.customer_id == customer.id,
             Invoice.status == InvoiceStatus.finalized,
         )
         .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+        .limit(200)
     ).all()
     return {
         "id": customer.id,
@@ -263,22 +271,22 @@ def customer_ledger(
         "outstanding_balance": float(customer.outstanding_balance or 0),
         "payments": [
             {
-                "id": p.id,
-                "paid_at": p.paid_at.isoformat() if p.paid_at else None,
-                "amount": float(p.amount),
-                "mode": p.mode,
-                "note": p.note,
+                "id": pid,
+                "paid_at": paid_at.isoformat() if paid_at else None,
+                "amount": float(amount),
+                "mode": mode,
+                "note": note,
             }
-            for p in payments
+            for pid, paid_at, amount, mode, note in payments
         ],
         "invoices": [
             {
-                "invoice_no": i.invoice_no,
-                "date": i.invoice_date.isoformat(),
-                "total": float(i.grand_total),
-                "outstanding": float(i.grand_total - i.amount_paid),
+                "invoice_no": no,
+                "date": d.isoformat(),
+                "total": float(total),
+                "outstanding": float(total - paid),
             }
-            for i in invoices[:200]
+            for no, d, total, paid in invoices
         ],
     }
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core import rbac
 from app.core.database import get_db
@@ -63,7 +63,7 @@ def get_current_user(
     except (jwt.PyJWTError, KeyError, ValueError):
         raise HTTPException(status_code=401, detail="Could not validate credentials")
 
-    user = db.get(User, user_id)
+    user = db.get(User, user_id, options=(joinedload(User.role),))
     if user is None or not user.is_active or user.is_deleted:
         raise HTTPException(status_code=401, detail="User not found or inactive")
 

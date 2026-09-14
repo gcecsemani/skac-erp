@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Numeric,
     String,
     UniqueConstraint,
@@ -28,6 +29,8 @@ class Invoice(Base, PKMixin, TimestampMixin):
         # Idempotent offline sync: one server invoice per client-generated uuid.
         UniqueConstraint("client_uuid", name="uq_invoice_client_uuid"),
         UniqueConstraint("branch_id", "invoice_no", name="uq_invoice_branch_no"),
+        Index("ix_invoice_org_status_date", "organization_id", "status", "invoice_date"),
+        Index("ix_invoice_org_date_id", "organization_id", "invoice_date", "id"),
     )
 
     organization_id: Mapped[int] = mapped_column(
@@ -76,13 +79,13 @@ class InvoiceItem(Base, PKMixin, TimestampMixin):
     invoice_id: Mapped[int] = mapped_column(
         ForeignKey("invoice.id"), nullable=False, index=True
     )
-    product_id: Mapped[int] = mapped_column(ForeignKey("product.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(ForeignKey("product.id"), nullable=False, index=True)
     batch_id: Mapped[int | None] = mapped_column(ForeignKey("batch.id"))
 
     # Snapshot fields (immutable record of what was printed on the invoice).
     product_name: Mapped[str] = mapped_column(String(200), nullable=False)
     hsn_code: Mapped[str | None] = mapped_column(String(12))
-    batch_no: Mapped[str | None] = mapped_column(String(80))
+    batch_no: Mapped[str | None] = mapped_column(String(80), index=True)
     mfg_date: Mapped[date | None] = mapped_column(Date)
     expiry_date: Mapped[date | None] = mapped_column(Date)
 

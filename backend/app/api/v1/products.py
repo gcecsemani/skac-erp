@@ -18,6 +18,23 @@ from app.schemas.masters import ProductBase, ProductCreate, ProductOut
 router = APIRouter(prefix="/products", tags=["products"])
 
 
+def _attrs_dict(product: Product) -> dict:
+    extra = product.attributes if isinstance(product.attributes, dict) else {}
+    return dict(extra or {})
+
+
+def _apply_product_fields(product: Product, data: dict) -> None:
+    sell_loose = data.pop("sell_loose", None)
+    data.pop("units", None)
+    for key, value in data.items():
+        setattr(product, key, value)
+    if sell_loose is None:
+        return
+    extra = _attrs_dict(product)
+    extra["sell_loose"] = bool(sell_loose)
+    product.attributes = extra
+
+
 @router.get("", response_model=list[ProductOut])
 def list_products(
     category: ProductCategory | None = None,
@@ -71,7 +88,10 @@ def create_product(
     db: Session = Depends(get_db),
 ) -> Product:
     data = payload.model_dump(exclude={"units"})
+    sell_loose = data.pop("sell_loose", None)
     product = Product(organization_id=current.organization_id, **data)
+    if sell_loose is not None:
+        product.attributes = {**(_attrs_dict(product)), "sell_loose": bool(sell_loose)}
     for u in payload.units:
         product.units.append(ProductUnit(unit=u.unit, factor_to_base=u.factor_to_base))
     db.add(product)
@@ -113,8 +133,7 @@ def update_product(
     db: Session = Depends(get_db),
 ) -> Product:
     product = _get_owned_product(db, product_id, current.organization_id)
-    for key, value in payload.model_dump().items():
-        setattr(product, key, value)
+    _apply_product_fields(product, payload.model_dump())
     record_audit(
         db, action="update", entity_type="product", entity_id=product.id,
         actor_user_id=current.id, organization_id=current.organization_id,

@@ -3,8 +3,6 @@ import { Banknote, Landmark, CheckCircle2, AlertTriangle } from "lucide-react";
 import { api } from "../api";
 import { inr } from "../format";
 import { Badge, BranchSelect, Card, Field, Loading, PageHeader, StatCard, Table } from "../components/ui";
-import { useAuth } from "../auth";
-import { seesAllBranches } from "../roles";
 import * as V from "../validate";
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -25,8 +23,6 @@ function Line({ label, value, strong, danger }: { label: string; value: number; 
 }
 
 export default function DayClose() {
-  const { user } = useAuth();
-  const allBranches = seesAllBranches(user);
   const [branches, setBranches] = useState<any[]>([]);
   const [branchId, setBranchId] = useState(0);
   const [closeDate, setCloseDate] = useState(today);

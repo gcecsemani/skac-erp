@@ -12,6 +12,7 @@ const empty = {
   sku: "", name: "", category: "fertilizer", hsn_code: "", base_unit: "bag",
   gst_rate: "5", mrp: "", purchase_price: "", sale_price: "", reorder_level: "",
   npk_n: "", npk_p: "", npk_k: "", toxicity_class: "", germination_pct: "", seed_lot: "",
+  sell_loose: true,
 };
 
 export default function Products() {
@@ -49,7 +50,11 @@ export default function Products() {
   const openCreate = () => { setEditId(null); setForm(empty); setErr(""); setOpen(true); };
   const openEdit = (r: any) => {
     setEditId(r.id); setErr("");
-    setForm({ ...empty, ...Object.fromEntries(Object.keys(empty).map((k) => [k, r[k] ?? ""])) });
+    setForm({
+      ...empty,
+      ...Object.fromEntries(Object.keys(empty).map((k) => [k, r[k] ?? ""])),
+      sell_loose: !!r.allows_loose,
+    });
     setOpen(true);
   };
   const remove = async (r: any) => {
@@ -82,6 +87,7 @@ export default function Products() {
       npk_n: numify(form.npk_n), npk_p: numify(form.npk_p), npk_k: numify(form.npk_k),
       toxicity_class: form.toxicity_class || null, germination_pct: numify(form.germination_pct),
       seed_lot: form.seed_lot || null,
+      sell_loose: form.sell_loose !== "" && form.sell_loose != null ? !!form.sell_loose : undefined,
     };
     try {
       const saved = editId ? await api.updateProduct(editId, payload) : await api.createProduct(payload);
@@ -203,6 +209,11 @@ export default function Products() {
             <Field label="MRP"><input type="number" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} /></Field>
             <Field label="Reorder level"><input type="number" value={form.reorder_level} onChange={(e) => setForm({ ...form, reorder_level: e.target.value })} /></Field>
           </div>
+          <label className="row" style={{ gap: 8, cursor: "pointer", width: "auto", marginBottom: 12 }}>
+            <input type="checkbox" style={{ width: "auto" }} checked={!!form.sell_loose}
+              onChange={(e) => setForm({ ...form, sell_loose: e.target.checked })} />
+            Also sell loose by kg (open a 50kg bag and bill 1 kg, 5 kg, …)
+          </label>
 
           {form.category === "fertilizer" && (
             <div className="grid grid-3">

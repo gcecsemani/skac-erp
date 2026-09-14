@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Plus, Undo2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Plus, Undo2 } from "lucide-react";
 import { api } from "../api";
 import { inr, matchesQuery } from "../format";
 import { Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
@@ -11,10 +11,14 @@ export default function Returns() {
   const [open, setOpen] = useState(false);
   const [invoiceId, setInvoiceId] = useState<number | "">("");
   const [invoiceHits, setInvoiceHits] = useState<any[]>([]);
+  const [searchingInv, setSearchingInv] = useState(false);
+  const [loadingInvoice, setLoadingInvoice] = useState(false);
   const [invoice, setInvoice] = useState<any>(null);
   const [qty, setQty] = useState<Record<number, number>>({});
   const [reason, setReason] = useState("");
   const [err, setErr] = useState("");
+  const findAc = useRef<AbortController | null>(null);
+  const findSeq = useRef(0);
 
   const load = () => api.creditNotes().then(setRows).catch(() => setRows([]));
   useEffect(() => { load(); }, []);
@@ -25,25 +29,42 @@ export default function Returns() {
   );
 
   const searchInvoices = (needle: string) => {
-    const q = needle.trim();
-    if (q.length === 1) return;
-    api.findInvoices(q).then(setInvoiceHits).catch(() => setInvoiceHits([]));
+    const seq = ++findSeq.current;
+    findAc.current?.abort();
+    const ac = new AbortController();
+    findAc.current = ac;
+    setSearchingInv(true);
+    api.findInvoices(needle.trim(), ac.signal).then((hits) => {
+      if (seq !== findSeq.current) return;
+      setInvoiceHits(hits);
+    }).catch((e: any) => {
+      if (e?.name === "AbortError") return;
+      if (seq !== findSeq.current) return;
+      setInvoiceHits([]);
+    }).finally(() => {
+      if (seq !== findSeq.current) return;
+      setSearchingInv(false);
+    });
   };
 
   const pickInvoice = (id: number | "") => {
     setErr("");
     setInvoiceId(id);
     setQty({});
-    if (!id) { setInvoice(null); return; }
+    if (!id) { setInvoice(null); setLoadingInvoice(false); return; }
     const hit = invoiceHits.find((inv) => inv.id === id);
-    if (hit) { setInvoice(hit); return; }
-    api.invoice(Number(id)).then((inv) => setInvoice(inv)).catch((e: any) => {
+    if (hit) setInvoice({ ...hit, items: hit.items || [] });
+    setLoadingInvoice(true);
+    api.invoice(Number(id)).then((inv) => {
+      setInvoice(inv);
+    }).catch((e: any) => {
       setErr(e.message); setInvoice(null);
-    });
+    }).finally(() => setLoadingInvoice(false));
   };
 
   useEffect(() => {
     if (open) searchInvoices("");
+    return () => findAc.current?.abort();
   }, [open]);
 
   const submit = async () => {
@@ -108,20 +129,28 @@ export default function Returns() {
           onClose={() => setOpen(false)}
           footer={<>
             <button className="btn btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
-            <button className="btn btn-primary" onClick={submit} disabled={!invoice}><Undo2 size={16} /> Issue Credit Note</button>
+            <button className="btn btn-primary" onClick={submit} disabled={!invoice || loadingInvoice}><Undo2 size={16} /> Issue Credit Note</button>
           </>}
         >
-          <Field label="Invoice #">
+          <Field label="Invoice">
             <SearchSelect
               value={invoiceId}
               options={invoiceHits}
-              placeholder="Type AVL/2026-27/00003 or farmer name"
+              loading={searchingInv}
+              placeholder="Invoice #, farmer name, or phone"
               onChange={pickInvoice}
               onQuery={searchInvoices}
-              getLabel={(inv) => `${inv.invoice_no} · ${inv.customer_name || "Walk-in"} · ${inr(inv.grand_total)}`}
+              getLabel={(inv) =>
+                `${inv.invoice_no} · ${inv.customer_name || "Walk-in"}${inv.customer_phone ? ` · ${inv.customer_phone}` : ""} · ${inr(inv.grand_total)}`
+              }
             />
           </Field>
           {err && <div className="error">{err}</div>}
+          {loadingInvoice && (
+            <p className="muted" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: -8 }}>
+              <Loader2 size={14} className="spin" /> Loading invoice…
+            </p>
+          )}
           {invoice && (
             <p className="muted" style={{ marginTop: -8 }}>
               {invoice.invoice_date} · {invoice.customer_name || "Walk-in"}
@@ -131,13 +160,13 @@ export default function Returns() {
               {invoice.payment_mode !== "cash" ? " · Credit bill — return posts a credit note against this invoice" : ""}
             </p>
           )}
-          {invoice && (
+          {invoice && !loadingInvoice && (
             <>
               <Field label="Reason" required><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Damaged / expired / wrong item" /></Field>
               <Table
                 columns={[
                   { key: "product_name", label: "Product" },
-                  { key: "quantity", label: "Sold", num: true },
+                  { key: "quantity", label: "Sold", num: true, render: (r: any) => `${r.quantity}${r.unit ? ` ${r.unit}` : ""}` },
                   { key: "ret", label: "Return qty", num: true, render: (r) => (
                     <input type="number" min={0} max={r.quantity} value={qty[r.product_id] ?? 0}
                       onChange={(e) => setQty((s) => ({ ...s, [r.product_id]: Number(e.target.value) }))}

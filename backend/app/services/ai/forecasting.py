@@ -152,13 +152,81 @@ def forecast_all(
             Product.is_deleted.is_(False),
         )
     ).all()
+    if not products:
+        return []
+
+    now = datetime.utcnow()
+    window_days = 90
+    lead_time_days = DEFAULT_LEAD_TIME_DAYS
+    safety_days = DEFAULT_SAFETY_DAYS
+    target_coverage_days = DEFAULT_TARGET_COVERAGE_DAYS
+
+    def sold_by_product(since: datetime, until: datetime | None = None) -> dict[int, Decimal]:
+        stmt = select(
+            StockMovement.product_id,
+            func.coalesce(func.sum(-StockMovement.quantity), 0),
+        ).where(
+            StockMovement.organization_id == organization_id,
+            StockMovement.movement_type == MovementType.sale,
+            StockMovement.occurred_at >= since,
+        )
+        if until is not None:
+            stmt = stmt.where(StockMovement.occurred_at < until)
+        if branch_id is not None:
+            stmt = stmt.where(StockMovement.branch_id == branch_id)
+        stmt = stmt.group_by(StockMovement.product_id)
+        return {int(pid): Decimal(qty or 0) for pid, qty in db.execute(stmt)}
+
+    sold_90 = sold_by_product(now - timedelta(days=window_days))
+    sold_30 = sold_by_product(now - timedelta(days=30))
+    sold_prev = sold_by_product(now - timedelta(days=60), now - timedelta(days=30))
+
+    stock_stmt = select(
+        Stock.product_id, func.coalesce(func.sum(Stock.quantity), 0),
+    ).where(Stock.organization_id == organization_id)
+    if branch_id is not None:
+        stock_stmt = stock_stmt.where(Stock.branch_id == branch_id)
+    stock_map = {
+        int(pid): Decimal(qty or 0)
+        for pid, qty in db.execute(stock_stmt.group_by(Stock.product_id))
+    }
+
     results = []
     for product in products:
-        fc = forecast_product(
-            db, organization_id=organization_id, product=product, branch_id=branch_id
-        )
-        if only_needing_purchase and fc.recommended_purchase_qty <= 0:
+        sold = sold_90.get(product.id, Decimal("0"))
+        avg_daily = (sold / Decimal(window_days)) if window_days else Decimal("0")
+        recent = sold_30.get(product.id, Decimal("0"))
+        prev = sold_prev.get(product.id, Decimal("0"))
+        if prev > 0:
+            trend_pct = float((recent - prev) / prev * 100)
+        elif recent > 0:
+            trend_pct = 100.0
+        else:
+            trend_pct = 0.0
+        trend = "rising" if trend_pct > 10 else "falling" if trend_pct < -10 else "stable"
+        current = stock_map.get(product.id, Decimal("0"))
+        reorder_point = avg_daily * Decimal(lead_time_days + safety_days)
+        stockout_date: str | None = None
+        if avg_daily > 0:
+            days_left = int(current / avg_daily)
+            stockout_date = (date.today() + timedelta(days=days_left)).isoformat()
+        recommended = avg_daily * Decimal(target_coverage_days) + reorder_point - current
+        if recommended < 0:
+            recommended = Decimal("0")
+        if only_needing_purchase and recommended <= 0:
             continue
-        results.append(fc.to_dict())
+        results.append(Forecast(
+            product_id=product.id,
+            product_name=product.name,
+            current_stock=float(current),
+            avg_daily_sales=round(float(avg_daily), 3),
+            weekly_sales=round(float(avg_daily * 7), 2),
+            monthly_sales=round(float(avg_daily * 30), 2),
+            trend=trend,
+            trend_pct=round(trend_pct, 1),
+            reorder_point=round(float(reorder_point), 2),
+            estimated_stockout_date=stockout_date,
+            recommended_purchase_qty=round(float(recommended), 2),
+        ).to_dict())
     results.sort(key=lambda r: r["recommended_purchase_qty"], reverse=True)
     return results

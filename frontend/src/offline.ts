@@ -122,7 +122,7 @@ export function matchProduct(p: any, q: string, category?: string) {
 /** Warm IndexedDB after login so POS / Farmers / Products open instantly next visit. */
 export async function prefetchMasters() {
   const existing = await getCachedProducts();
-  const jobs: Promise<unknown>[] = [refreshCustomers()];
+  const jobs: Promise<unknown>[] = [refreshCustomers({ outstandingOnly: true, limit: 400 })];
   // Do not overwrite a stocked POS catalog with a master-only fetch.
   if (!existing.length) jobs.push(api.products().then(cacheProducts));
   await Promise.all(jobs);
@@ -143,9 +143,10 @@ export async function refreshProducts(branchId?: number) {
   return rows;
 }
 
-export async function refreshCustomers() {
-  const rows = await api.customers(undefined, 25000);
-  await cacheCustomers(rows);
+export async function refreshCustomers(opts?: { search?: string; limit?: number; outstandingOnly?: boolean }) {
+  const rows = await api.customers(opts?.search, opts?.limit ?? 400, opts?.outstandingOnly);
+  if (!opts?.search) await cacheCustomers(rows);
+  else rows.forEach((row) => upsertCached("customers", row));
   return rows;
 }
 

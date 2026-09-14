@@ -10,11 +10,10 @@ import { useConfigBundle } from "../configBundle";
 import { useAuth } from "../auth";
 import { seesAllBranches } from "../roles";
 
-const monthStart = () => {
+const today = () => {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-const today = () => new Date().toISOString().slice(0, 10);
 
 export default function Invoices() {
   const { user } = useAuth();
@@ -24,7 +23,7 @@ export default function Invoices() {
   const [sel, setSel] = useState<any>(null);
   const [branches, setBranches] = useState<any[]>([]);
   const [branchId, setBranchId] = useState<number>(0);
-  const [start, setStart] = useState(monthStart);
+  const [start, setStart] = useState(today);
   const [end, setEnd] = useState(today);
   const [search, setSearch] = useState("");
   const [q, setQ] = useState("");
@@ -33,6 +32,7 @@ export default function Invoices() {
   const [limit, setLimit] = useState(50);
 
   const load = () => {
+    const ac = new AbortController();
     setRows(null);
     api.invoices({
       branchId: branchId || undefined,
@@ -41,7 +41,12 @@ export default function Invoices() {
       unpaidOnly: unpaidOnly || undefined,
       paymentMode: paymentMode || undefined,
       limit,
-    }).then(setRows).catch(() => setRows([]));
+      signal: ac.signal,
+    }).then(setRows).catch((e) => {
+      if (e?.name === "AbortError") return;
+      setRows([]);
+    });
+    return () => ac.abort();
   };
 
   useEffect(() => {
@@ -50,7 +55,20 @@ export default function Invoices() {
       if (!allBranches && b[0]) setBranchId(b[0].id);
     }).catch(() => setBranches([]));
   }, []);
-  useEffect(() => { load(); }, [branchId, start, end, q, unpaidOnly, paymentMode, limit]);
+  useEffect(() => {
+    return load();
+  }, [branchId, start, end, q, unpaidOnly, paymentMode, limit]);
+
+  const openInvoice = async (r: any) => {
+    setSel(r);
+    try { setSel(await api.invoice(r.id)); } catch { /* keep the summary row */ }
+  };
+  const printInvoice = async (r: any) => {
+    try {
+      const full = r.items?.length ? r : await api.invoice(r.id);
+      printThermalReceipt(full);
+    } catch (e: any) { alert(e.message); }
+  };
 
   if (!rows) return <Loading />;
 
@@ -78,13 +96,16 @@ export default function Invoices() {
         <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
           <div style={{ position: "relative", flex: "1 1 220px", minWidth: 180 }}>
             <Search size={16} style={{ position: "absolute", left: 10, top: 11, color: "#94a3b8" }} />
-            <input placeholder="Invoice # or farmer…" value={search} onChange={(e) => setSearch(e.target.value)}
+            <input placeholder="Invoice #, farmer, or phone…" value={search} onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") setQ(search); }} style={{ paddingLeft: 32 }} />
           </div>
           <button className="btn btn-ghost btn-sm" onClick={() => setQ(search)}>Search</button>
           <BranchSelect value={branchId} onChange={setBranchId} branches={branches} allowAll={allBranches} />
-          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} style={{ width: "auto" }} />
-          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} style={{ width: "auto" }} />
+          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} style={{ width: "auto" }} title="From date" />
+          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} style={{ width: "auto" }} title="To date" />
+          {(start !== today() || end !== today()) && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { const t = today(); setStart(t); setEnd(t); }}>Today</button>
+          )}
           <PaymentSelect
             value={paymentMode}
             onChange={setPaymentMode}
@@ -103,7 +124,6 @@ export default function Invoices() {
             <option value={100}>Load 100</option>
             <option value={200}>Load 200</option>
             <option value={500}>Load 500</option>
-            <option value={1000}>Load 1000</option>
           </select>
         </div>
         <Table
@@ -125,20 +145,20 @@ export default function Invoices() {
             }},
             { key: "view", label: "", render: (r) => (
               <div className="row" style={{ gap: 4, justifyContent: "flex-end" }}>
-                <button className="btn btn-ghost btn-sm" title="Print" onClick={() => printThermalReceipt(r)}><Printer size={15} /></button>
-                <button className="btn btn-ghost btn-sm" onClick={() => setSel(r)}><Eye size={15} /></button>
+                <button className="btn btn-ghost btn-sm" title="Print" onClick={() => printInvoice(r)}><Printer size={15} /></button>
+                <button className="btn btn-ghost btn-sm" onClick={() => openInvoice(r)}><Eye size={15} /></button>
               </div>
             ) },
           ]}
           rows={rows}
-          empty="No invoices in this period"
+          empty={start === end ? `No invoices on ${start}` : "No invoices in this period"}
           pageSize={50}
         />
       </Card>
 
       {sel && (
         <Modal title={`Invoice ${sel.invoice_no}`} onClose={() => setSel(null)} wide
-          footer={<button className="btn btn-primary" onClick={() => printThermalReceipt(sel)}><Printer size={16} /> Print receipt</button>}>
+          footer={<button className="btn btn-primary" onClick={() => printInvoice(sel)}><Printer size={16} /> Print receipt</button>}>
           <div className="row mb-16" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
             <div><div className="muted">Date</div><strong>{sel.invoice_date}</strong></div>
             <div><div className="muted">Branch</div><strong>{sel.branch_name || "—"}</strong></div>
@@ -158,7 +178,7 @@ export default function Invoices() {
               { key: "product_name", label: "Product" },
               { key: "batch_no", label: "Batch" },
               { key: "expiry_date", label: "Expiry" },
-              { key: "quantity", label: "Qty", num: true },
+              { key: "quantity", label: "Qty", num: true, render: (r) => `${r.quantity}${r.unit ? ` ${r.unit}` : ""}` },
               { key: "unit_price", label: "Rate", num: true, render: (r) => inr(r.unit_price) },
               { key: "discount", label: "Disc", num: true, render: (r) => Number(r.discount) > 0 ? inr(r.discount) : "—" },
               { key: "line_total", label: "Total", num: true, render: (r) => inr(r.line_total) },

@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -69,8 +69,8 @@ def list_users(
     current: CurrentUser = Depends(require_permission(rbac.P_USER_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    rows = db.scalars(select(User).where(
-        User.organization_id == current.organization_id, User.is_deleted.is_(False))).all()
+    rows = db.scalars(select(User).options(joinedload(User.role)).where(
+        User.organization_id == current.organization_id, User.is_deleted.is_(False))).unique().all()
     return [
         {"id": u.id, "full_name": u.full_name, "email": u.email, "role": u.role.key,
          "is_active": u.is_active, "totp_enabled": u.totp_enabled,

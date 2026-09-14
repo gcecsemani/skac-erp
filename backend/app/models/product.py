@@ -72,6 +72,38 @@ class Product(Base, PKMixin, TimestampMixin, SoftDeleteMixin):
         back_populates="product", cascade="all, delete-orphan"
     )
 
+    @property
+    def packing(self) -> str | None:
+        extra = self.attributes if isinstance(self.attributes, dict) else {}
+        pack = str((extra or {}).get("packing") or "").strip()
+        if pack and pack.upper() not in {"UNIT", "UNITS"}:
+            return pack
+        return None
+
+    @property
+    def sale_unit(self) -> str:
+        from app.core.units import sale_unit_of
+
+        return sale_unit_of(self)
+
+    @property
+    def pack_size(self):
+        from app.core.units import pack_info
+
+        return pack_info(self).pack_size
+
+    @property
+    def loose_unit(self) -> str | None:
+        from app.core.units import pack_info
+
+        return pack_info(self).loose_unit
+
+    @property
+    def allows_loose(self) -> bool:
+        from app.core.units import pack_info
+
+        return pack_info(self).allows_loose
+
 
 class ProductUnit(Base, PKMixin, TimestampMixin):
     """Alternate saleable units with conversion factor to the base unit.

@@ -106,6 +106,7 @@ class ProductBase(BaseModel):
     toxicity_class: str | None = None
     germination_pct: Decimal | None = None
     seed_lot: str | None = None
+    sell_loose: bool | None = None
 
 
 class ProductCreate(ProductBase):
@@ -118,6 +119,11 @@ class ProductOut(ProductBase):
     is_active: bool
     is_favorite: bool = False
     stock_qty: Decimal | None = None
+    packing: str | None = None
+    sale_unit: str = "pcs"
+    pack_size: Decimal = Decimal("1")
+    loose_unit: str | None = None
+    allows_loose: bool = False
 
     model_config = {"from_attributes": True}
 

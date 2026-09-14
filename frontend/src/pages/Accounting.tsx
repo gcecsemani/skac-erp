@@ -13,16 +13,21 @@ export default function Accounting() {
   const [gst, setGst] = useState<any>(null);
   const [aging, setAging] = useState<any>(null);
   const [payables, setPayables] = useState<any>(null);
-  const [accounts, setAccounts] = useState<any[]>([]);
-  const [daybook, setDaybook] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[] | null>(null);
+  const [daybook, setDaybook] = useState<any[] | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    Promise.all([
-      api.pnl().then(setPnl), api.gstSummary().then(setGst), api.receivablesAging().then(setAging),
-      api.payables().then(setPayables), api.accounts().then(setAccounts), api.daybook().then(setDaybook),
-    ]).finally(() => setReady(true));
+    api.pnl().then(setPnl).catch(() => setPnl({})).finally(() => setReady(true));
   }, []);
+
+  useEffect(() => {
+    if (tab === "gst" && gst === null) api.gstSummary().then(setGst).catch(() => setGst({ slabs: [] }));
+    if (tab === "aging" && aging === null) api.receivablesAging().then(setAging).catch(() => setAging({ buckets: {}, total: 0 }));
+    if (tab === "payables" && payables === null) api.payables().then(setPayables).catch(() => setPayables({ vendors: [] }));
+    if (tab === "accounts" && accounts === null) api.accounts().then(setAccounts).catch(() => setAccounts([]));
+    if (tab === "daybook" && daybook === null) api.daybook().then(setDaybook).catch(() => setDaybook([]));
+  }, [tab]);
 
   const gstRows = useMemo(
     () => (gst?.slabs || []).filter((r: any) => matchesQuery(q, r.gst_rate, r.taxable_value, r.cgst, r.sgst, r.total_tax)),
@@ -33,15 +38,15 @@ export default function Accounting() {
     [payables, q],
   );
   const accountTypes = useMemo(
-    () => [...new Set(accounts.map((r) => r.type).filter(Boolean))],
+    () => [...new Set((accounts || []).map((r) => r.type).filter(Boolean))],
     [accounts],
   );
   const accountRows = useMemo(
-    () => accounts.filter((r) => (!acctType || r.type === acctType) && matchesQuery(q, r.code, r.name, r.type)),
+    () => (accounts || []).filter((r) => (!acctType || r.type === acctType) && matchesQuery(q, r.code, r.name, r.type)),
     [accounts, q, acctType],
   );
   const daybookRows = useMemo(
-    () => daybook.filter((e) => matchesQuery(
+    () => (daybook || []).filter((e) => matchesQuery(
       q, e.narration, e.date, e.ref_type, e.ref_id,
       ...(e.lines || []).flatMap((l: any) => [l.code, l.account]),
     )),
@@ -79,7 +84,7 @@ export default function Accounting() {
         </Card>
       )}
 
-      {tab === "gst" && (
+      {tab === "gst" && (gst === null ? <Loading /> : (
         <Card title="GSTR-1 / 3B Outward Supply Summary">
           <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
             <SearchInput value={q} onChange={setQ} placeholder="Search GST rate or amount…" />
@@ -99,9 +104,9 @@ export default function Accounting() {
             <span>Total tax: <strong>{inr(gst?.total_tax)}</strong></span>
           </div>
         </Card>
-      )}
+      ))}
 
-      {tab === "aging" && (
+      {tab === "aging" && (aging === null ? <Loading /> : (
         <div className="grid grid-2">
           <Card title="Receivables Aging">
             <ResponsiveContainer width="100%" height={260}>
@@ -121,18 +126,18 @@ export default function Accounting() {
             <div className="row mt-8" style={{ justifyContent: "flex-end", paddingTop: 12, borderTop: "1px solid var(--border)" }}>Total: <strong>&nbsp;{inr(aging?.total)}</strong></div>
           </Card>
         </div>
-      )}
+      ))}
 
-      {tab === "payables" && (
+      {tab === "payables" && (payables === null ? <Loading /> : (
         <Card title="Vendor Payables">
           <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
             <SearchInput value={q} onChange={setQ} placeholder="Search vendor…" />
           </div>
           <Table columns={[{ key: "name", label: "Vendor" }, { key: "outstanding", label: "Payable", num: true, render: (r) => <strong>{inr(r.outstanding)}</strong> }]} rows={payableRows} empty={payables?.vendors?.length ? "No vendors match the search" : "No payables"} />
         </Card>
-      )}
+      ))}
 
-      {tab === "accounts" && (
+      {tab === "accounts" && (accounts === null ? <Loading /> : (
         <Card title="Chart of Accounts">
           <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
             <SearchInput value={q} onChange={setQ} placeholder="Search code or account…" />
@@ -143,16 +148,16 @@ export default function Accounting() {
               </select>
             )}
           </div>
-          <Table columns={[{ key: "code", label: "Code" }, { key: "name", label: "Account" }, { key: "type", label: "Type", render: (r) => <span style={{ textTransform: "capitalize" }}>{r.type}</span> }]} rows={accountRows} empty={accounts.length ? "No accounts match the filters" : "No accounts"} />
+          <Table columns={[{ key: "code", label: "Code" }, { key: "name", label: "Account" }, { key: "type", label: "Type", render: (r) => <span style={{ textTransform: "capitalize" }}>{r.type}</span> }]} rows={accountRows} empty={(accounts || []).length ? "No accounts match the filters" : "No accounts"} />
         </Card>
-      )}
+      ))}
 
       {tab === "daybook" && (
         <Card title="Day-book (Journal Entries)">
           <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
             <SearchInput value={q} onChange={setQ} placeholder="Search narration, ref or account…" />
           </div>
-          {daybookRows.length === 0 ? <div className="empty">{daybook.length ? "No entries match the search" : "No entries"}</div> : daybookRows.map((e) => (
+          {daybook === null ? <Loading /> : daybookRows.length === 0 ? <div className="empty">{daybook.length ? "No entries match the search" : "No entries"}</div> : daybookRows.map((e) => (
             <div key={e.id} style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <strong>{e.narration}</strong><span className="muted">{e.date} · {e.ref_type} #{e.ref_id}</span>

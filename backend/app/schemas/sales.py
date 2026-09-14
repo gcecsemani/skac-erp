@@ -80,7 +80,7 @@ class InvoiceOut(BaseModel):
     grand_total: Decimal
     amount_paid: Decimal
     finalized_at: datetime | None
-    items: list[InvoiceItemOut]
+    items: list[InvoiceItemOut] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

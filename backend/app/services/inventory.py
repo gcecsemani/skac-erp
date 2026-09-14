@@ -35,19 +35,40 @@ class InsufficientStock(Exception):
         )
 
 
-def describe_shortfall(db: Session, exc: InsufficientStock) -> str:
+def describe_shortfall(
+    db: Session,
+    exc: InsufficientStock,
+    *,
+    billed_unit: str | None = None,
+    billed_qty: Decimal | None = None,
+) -> str:
+    from app.core.units import is_loose_sale, pack_info
     from app.models.product import Product
 
     product = db.get(Product, exc.product_id)
     name = product.name if product else "This item"
-    unit = (getattr(product, "base_unit", None) or "units")
-    req = f"{exc.requested:g}"
-    avail = f"{exc.available:g}"
-    if exc.available <= 0:
+    billed_unit = billed_unit or getattr(exc, "billed_unit", None)
+    billed_qty = billed_qty if billed_qty is not None else getattr(exc, "billed_qty", None)
+    unit = (getattr(product, "sale_unit", None) or getattr(product, "base_unit", None) or "units")
+    req = Decimal(exc.requested)
+    avail = Decimal(exc.available)
+    if product is not None and is_loose_sale(product, billed_unit):
+        info = pack_info(product)
+        unit = billed_unit or info.loose_unit or unit
+        req = Decimal(billed_qty) if billed_qty is not None else (req * info.pack_size)
+        avail = avail * info.pack_size
+    if avail <= 0:
         return f"{name} is out of stock at this branch. Receive stock before billing it."
+
+    def _fmt(n: Decimal) -> str:
+        s = format(n.normalize(), "f")
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s
+
     return (
-        f"Not enough stock for {name}. You requested {req} {unit}, "
-        f"but only {avail} {unit} is available at this branch."
+        f"Not enough stock for {name}. You requested {_fmt(req)} {unit}, "
+        f"but only {_fmt(avail)} {unit} is available at this branch."
     )
 
 

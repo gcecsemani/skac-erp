@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.accounting import JournalEntry, JournalLine, LedgerAccount
 from app.models.enums import AccountType
@@ -188,19 +188,21 @@ def post_credit_note(db, *, organization_id, branch_id, entry_date, credit_note_
 
 # --- Reports ---
 def daybook(db: Session, *, organization_id: int, start: date, end: date,
-            branch_ids: list[int] | None) -> list[dict]:
+            branch_ids: list[int] | None, limit: int = 400) -> list[dict]:
     stmt = (
         select(JournalEntry)
+        .options(selectinload(JournalEntry.lines).joinedload(JournalLine.account))
         .where(
             JournalEntry.organization_id == organization_id,
             JournalEntry.entry_date >= start, JournalEntry.entry_date <= end,
         )
         .order_by(JournalEntry.entry_date.desc(), JournalEntry.id.desc())
+        .limit(limit)
     )
     if branch_ids is not None:
         stmt = stmt.where(JournalEntry.branch_id.in_(branch_ids))
     out = []
-    for e in db.scalars(stmt).all():
+    for e in db.scalars(stmt).unique().all():
         out.append({
             "id": e.id, "date": e.entry_date.isoformat(), "narration": e.narration,
             "ref_type": e.ref_type, "ref_id": e.ref_id,

@@ -28,8 +28,20 @@ export default function Customers() {
 
   useEffect(() => {
     getCachedCustomers().then((cached) => { if (cached.length) setRows(cached); }).catch(() => {});
-    refreshCustomers().then(setRows).catch(() => setRows((cur) => cur || []));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const q = search.trim();
+    const t = window.setTimeout(() => {
+      const job = q
+        ? api.customers(q, 200)
+        : refreshCustomers({ outstandingOnly: true, limit: 200 });
+      job.then((list) => { if (!cancelled) setRows(list); })
+        .catch(() => { if (!cancelled) setRows((cur) => cur || []); });
+    }, q ? 220 : 0);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [search]);
 
   const filtered = useMemo(
     () => (rows || [])
@@ -89,7 +101,7 @@ export default function Customers() {
     <div>
       <PageHeader
         title="Farmers / Customers"
-        subtitle="Customer master with credit (khata) accounts"
+        subtitle="Khata farmers first — search name, phone or Aadhaar to find anyone"
         actions={
           <div className="row">
             <ExportButtons title="Farmers" columns={[
@@ -201,7 +213,7 @@ export default function Customers() {
                 upsertCached("customers", next);
                 setRows((cur) => (cur || []).map((x) => x.id === next.id ? { ...x, ...next } : x));
                 setPay(null); setPayConfirm(false);
-                refreshCustomers().then(setRows).catch(() => {});
+                refreshCustomers({ outstandingOnly: true, limit: 200 }).then(setRows).catch(() => {});
               } catch (e: any) { setPayErr(e.message); }
             }}>{payConfirm ? `Confirm ${inr(Number(payForm.amount) || 0)}?` : "Record payment"}</button>
           </>}

@@ -93,7 +93,7 @@ export function printThermalReceipt(inv: any) {
   const items = (inv.items || []).map((it: any) => `
     <tr>
       <td>${esc(it.product_name)}${it.batch_no ? `<div class="muted">B:${esc(it.batch_no)}</div>` : ""}</td>
-      <td class="r">${esc(it.quantity)}</td>
+      <td class="r">${esc(it.quantity)}${it.unit ? ` ${esc(it.unit)}` : ""}</td>
       <td class="r">${Number(it.line_total).toFixed(2)}</td>
     </tr>`).join("");
   const licenses = [

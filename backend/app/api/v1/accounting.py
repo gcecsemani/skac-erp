@@ -1,17 +1,16 @@
 """Accounting & finance reports: accounts, day-book, P&L, GST, aging."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
 from app.core import rbac
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_permission
 from app.models.accounting import LedgerAccount
-from app.models.customer import Customer
 from app.models.enums import InvoiceStatus
 from app.models.sales import Invoice, InvoiceItem
 from app.models.vendor import Vendor
@@ -47,12 +46,13 @@ def chart_of_accounts(
 @router.get("/daybook")
 def daybook(
     start: str | None = None, end: str | None = None,
+    limit: int = Query(400, ge=1, le=2000),
     current: CurrentUser = Depends(require_permission(rbac.P_ACCOUNTING_VIEW)),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     s, e = _parse(start, end)
     return acc.daybook(db, organization_id=current.organization_id, start=s, end=e,
-                       branch_ids=_branch_scope(current))
+                       branch_ids=_branch_scope(current), limit=limit)
 
 
 @router.get("/pnl")
@@ -113,7 +113,18 @@ def receivables_aging(
     db: Session = Depends(get_db),
 ) -> dict:
     """Age unpaid invoice balances into 0-30 / 31-60 / 61-90 / 90+ buckets."""
-    stmt = select(Invoice).where(
+    dialect = db.get_bind().dialect.name
+    if dialect == "sqlite":
+        age = func.julianday(func.current_date()) - func.julianday(Invoice.invoice_date)
+    else:
+        age = func.datediff(func.current_date(), Invoice.invoice_date)
+    due = Invoice.grand_total - Invoice.amount_paid
+    stmt = select(
+        func.coalesce(func.sum(case((age <= 30, due), else_=0)), 0),
+        func.coalesce(func.sum(case((and_(age > 30, age <= 60), due), else_=0)), 0),
+        func.coalesce(func.sum(case((and_(age > 60, age <= 90), due), else_=0)), 0),
+        func.coalesce(func.sum(case((age > 90, due), else_=0)), 0),
+    ).where(
         Invoice.organization_id == current.organization_id,
         Invoice.status == InvoiceStatus.finalized,
         Invoice.grand_total > Invoice.amount_paid,
@@ -121,14 +132,13 @@ def receivables_aging(
     scope = _branch_scope(current)
     if scope is not None:
         stmt = stmt.where(Invoice.branch_id.in_(scope))
-    buckets = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
-    today = date.today()
-    for inv in db.scalars(stmt).all():
-        due = float(inv.grand_total - inv.amount_paid)
-        age = (today - inv.invoice_date).days
-        key = "0-30" if age <= 30 else "31-60" if age <= 60 else "61-90" if age <= 90 else "90+"
-        buckets[key] += due
-    buckets = {k: round(v, 2) for k, v in buckets.items()}
+    b0, b1, b2, b3 = db.execute(stmt).one()
+    buckets = {
+        "0-30": round(float(b0 or 0), 2),
+        "31-60": round(float(b1 or 0), 2),
+        "61-90": round(float(b2 or 0), 2),
+        "90+": round(float(b3 or 0), 2),
+    }
     return {"buckets": buckets, "total": round(sum(buckets.values()), 2)}
 
 

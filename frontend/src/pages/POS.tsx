@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Trash2, Wifi, WifiOff, RefreshCw, CreditCard, CheckCircle2, User, X, UserPlus, Star, Printer } from "lucide-react";
 import { api } from "../api";
-import { CATEGORY_COLORS, inr } from "../format";
+import { CATEGORY_COLORS, billedToStock, inr, loosePrice, packInfo, saleUnit } from "../format";
 import { printThermalReceipt } from "../print";
 import { Card, PageHeader, Badge, Modal, Field, Switch } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
@@ -16,7 +16,9 @@ const FARMER_PICK_CAP = 12;
 
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-interface Line { product_id: number; name: string; quantity: number; unit_price: number; gst_rate: number; discount: number; }
+interface Line { key: string; product_id: number; name: string; quantity: number; unit_price: number; gst_rate: number; discount: number; unit: string; }
+
+const lineKey = (productId: number, unit: string) => `${productId}::${unit}`;
 
 export default function POS() {
   const { bundle, ready } = useConfigBundle();
@@ -31,6 +33,7 @@ export default function POS() {
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   const [farmerBook, setFarmerBook] = useState<any[]>([]);
+  const [remoteFarmers, setRemoteFarmers] = useState<any[] | null>(null);
   const [customer, setCustomer] = useState<any | null>(null);
   const [custQuery, setCustQuery] = useState("");
   const [custOpen, setCustOpen] = useState(false);
@@ -67,7 +70,7 @@ export default function POS() {
     api.branches().then((b) => { setBranches(b); if (b[0]) setBranchId(b[0].id); }).catch(() => {});
     getCachedProducts().then((cached) => { if (cached.length) setProducts(cached); }).catch(() => {});
     getCachedCustomers().then((cached) => { if (cached.length) setFarmerBook(cached); }).catch(() => {});
-    refreshCustomers().then(setFarmerBook).catch(() => {});
+    refreshCustomers({ outstandingOnly: true, limit: 400 }).then(setFarmerBook).catch(() => {});
     const on = () => setOnline(true), off = () => setOnline(false);
     window.addEventListener("online", on); window.addEventListener("offline", off);
     pendingCount().then(setPending);
@@ -100,11 +103,27 @@ export default function POS() {
   const searching = search.trim().length > 0;
   const filtered = searching ? filteredAll.slice(0, POS_TILE_CAP) : favorites;
 
+  useEffect(() => {
+    const q = custQuery.trim();
+    if (!online || q.length < 2) {
+      setRemoteFarmers(null);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      api.customers(q, 12).then((rows) => {
+        setRemoteFarmers(rows);
+        rows.forEach((r) => upsertCached("customers", r));
+      }).catch(() => setRemoteFarmers(null));
+    }, 180);
+    return () => window.clearTimeout(t);
+  }, [custQuery, online]);
+
   const farmerHits = useMemo(() => {
     const q = custQuery.trim();
     if (!q) return [];
+    if (remoteFarmers) return remoteFarmers.slice(0, FARMER_PICK_CAP);
     return farmerBook.filter((c) => matchCustomer(c, q)).slice(0, FARMER_PICK_CAP);
-  }, [farmerBook, custQuery]);
+  }, [farmerBook, custQuery, remoteFarmers]);
 
   const toggleFav = async (p: any) => {
     const next = !p.is_favorite;
@@ -129,7 +148,7 @@ export default function POS() {
   const refreshFarmerBook = async () => {
     setRefreshingFarmers(true);
     try {
-      setFarmerBook(await refreshCustomers());
+      setFarmerBook(await refreshCustomers({ outstandingOnly: true, limit: 400 }));
       setMsg({ text: "Farmer list refreshed.", ok: true });
     } catch (e: any) {
       setMsg({ text: e.message || "Could not refresh farmers.", ok: false });
@@ -143,43 +162,89 @@ export default function POS() {
     const n = Number(p.stock_qty);
     return Number.isFinite(n) ? n : null;
   };
-  const unitOf = (p: any) => p.base_unit || "units";
+  const unitOf = (p: any) => saleUnit(p);
+  const stockUsed = (productId: number) => lines
+    .filter((l) => l.product_id === productId)
+    .reduce((sum, l) => {
+      const p = products.find((x) => x.id === productId);
+      return sum + billedToStock(l.quantity, l.unit, packInfo(p || { name: l.name, sale_unit: l.unit }));
+    }, 0);
 
-  const add = (p: any) => {
+  const add = (p: any, loose = false) => {
+    const info = packInfo(p);
+    const unit = loose && info.allowsLoose ? (info.looseUnit || "kg") : unitOf(p);
+    const key = lineKey(p.id, unit);
+    const addQty = 1;
+    const need = billedToStock(addQty, unit, info);
     const stock = stockOf(p);
-    const inCart = lines.find((l) => l.product_id === p.id)?.quantity || 0;
+    const used = stockUsed(p.id);
     if (stock != null && stock <= 0) {
       setMsg({ text: `${p.name} is out of stock at this branch. Receive stock before billing it.`, ok: false });
       return;
     }
-    if (stock != null && inCart + 1 > stock) {
-      setMsg({ text: `Only ${stock} ${unitOf(p)} of ${p.name} left. You already have ${inCart} on this bill.`, ok: false });
+    if (!loose && stock != null && stock - used > 0 && stock - used < 1 && info.allowsLoose) {
+      const left = Math.round((stock - used) * info.packSize * 1000) / 1000;
+      setMsg({ text: `Opened pack: ${left} ${info.looseUnit} of ${p.name} left. Add as ${info.looseUnit}.`, ok: false });
       return;
     }
+    if (stock != null && used + need > stock + 1e-9) {
+      const left = Math.max(0, stock - used);
+      if (loose && info.allowsLoose) {
+        setMsg({ text: `Only ${Math.round(left * info.packSize * 1000) / 1000} ${info.looseUnit} of ${p.name} left.`, ok: false });
+      } else {
+        setMsg({ text: `Only ${Math.round(left * 1000) / 1000} ${unitOf(p)} of ${p.name} left.`, ok: false });
+      }
+      return;
+    }
+    const price = loose && info.allowsLoose ? loosePrice(Number(p.sale_price), info) : Number(p.sale_price);
     setMsg(null);
     setLines((cur) => {
-      const ex = cur.find((l) => l.product_id === p.id);
-      if (ex) return cur.map((l) => l.product_id === p.id ? { ...l, quantity: l.quantity + 1 } : l);
-      return [...cur, { product_id: p.id, name: p.name, quantity: 1, unit_price: Number(p.sale_price), gst_rate: Number(p.gst_rate), discount: 0 }];
+      const ex = cur.find((l) => l.key === key);
+      if (ex) return cur.map((l) => l.key === key ? { ...l, quantity: l.quantity + addQty } : l);
+      return [...cur, { key, product_id: p.id, name: p.name, quantity: addQty, unit_price: price, gst_rate: Number(p.gst_rate), discount: 0, unit }];
     });
   };
-  const setQty = (id: number, q: number) => setLines((cur) => cur.map((l) => {
-    if (l.product_id !== id) return l;
-    const p = products.find((x) => x.id === id);
+  const setQty = (key: string, q: number) => setLines((cur) => cur.map((l) => {
+    if (l.key !== key) return l;
+    const p = products.find((x) => x.id === l.product_id);
+    const info = packInfo(p || { name: l.name, sale_unit: l.unit });
+    const loose = info.allowsLoose && l.unit === info.looseUnit;
+    const min = loose ? 0.01 : 0.001;
+    const next = Number.isFinite(q) ? Math.max(min, q) : min;
     const stock = p ? stockOf(p) : null;
-    const next = Math.max(1, q);
-    if (stock != null && next > stock) {
-      setMsg({ text: `Only ${stock} ${p ? unitOf(p) : "units"} of ${l.name} available at this branch.`, ok: false });
-      return { ...l, quantity: Math.max(1, stock) };
+    const others = stockUsed(l.product_id) - billedToStock(l.quantity, l.unit, info);
+    const need = billedToStock(next, l.unit, info);
+    if (stock != null && others + need > stock + 1e-9) {
+      const leftPacks = Math.max(min, stock - others);
+      const maxBilled = loose ? leftPacks * info.packSize : leftPacks;
+      setMsg({ text: `Only ${Math.round(maxBilled * 1000) / 1000} ${l.unit} of ${l.name} available at this branch.`, ok: false });
+      return { ...l, quantity: Math.round(maxBilled * 1000) / 1000 };
     }
     return { ...l, quantity: next };
   }));
-  const setLineDisc = (id: number, d: number) => setLines((cur) => cur.map((l) => {
-    if (l.product_id !== id) return l;
+  const setLineUnit = (key: string, nextUnit: string) => setLines((cur) => {
+    const l = cur.find((x) => x.key === key);
+    if (!l || l.unit === nextUnit) return cur;
+    const p = products.find((x) => x.id === l.product_id);
+    const info = packInfo(p || { name: l.name, sale_unit: l.unit });
+    const stockQty = billedToStock(l.quantity, l.unit, info);
+    const toLoose = info.allowsLoose && nextUnit === info.looseUnit;
+    const nextBilled = toLoose ? stockQty * info.packSize : stockQty;
+    const nextPrice = toLoose ? loosePrice(Number(p?.sale_price || 0), info) : Number(p?.sale_price || l.unit_price);
+    const nextKey = lineKey(l.product_id, nextUnit);
+    const rest = cur.filter((x) => x.key !== key);
+    const ex = rest.find((x) => x.key === nextKey);
+    if (ex) {
+      return rest.map((x) => x.key === nextKey ? { ...x, quantity: x.quantity + nextBilled, discount: 0 } : x);
+    }
+    return [...rest, { ...l, key: nextKey, unit: nextUnit, quantity: Math.round(nextBilled * 1000) / 1000, unit_price: nextPrice, discount: 0 }];
+  });
+  const setLineDisc = (key: string, d: number) => setLines((cur) => cur.map((l) => {
+    if (l.key !== key) return l;
     const cap = r2(l.quantity * l.unit_price);
     return { ...l, discount: Math.min(Math.max(0, d), cap) };
   }));
-  const remove = (id: number) => setLines((cur) => cur.filter((l) => l.product_id !== id));
+  const remove = (key: string) => setLines((cur) => cur.filter((l) => l.key !== key));
 
   const totals = useMemo(() => {
     const grossLines = lines.map((l) => {
@@ -284,6 +349,7 @@ export default function POS() {
         quantity: l.quantity,
         unit_price: l.unit_price,
         discount: l.discount,
+        unit: l.unit,
       })),
     };
     try {
@@ -304,9 +370,11 @@ export default function POS() {
       }
       setLines([]); selectCustomer(null); setBillDiscount(""); setDiscMode("inr"); setPayment("cash");
       setProducts((cur) => cur.map((p) => {
-        const sold = payload.lines.find((l) => l.product_id === p.id);
-        if (!sold || p.stock_qty == null) return p;
-        const next = { ...p, stock_qty: Math.max(0, Number(p.stock_qty) - Number(sold.quantity)) };
+        const sold = payload.lines.filter((l) => l.product_id === p.id);
+        if (!sold.length || p.stock_qty == null) return p;
+        const info = packInfo(p);
+        const deduct = sold.reduce((s, l) => s + billedToStock(Number(l.quantity), l.unit, info), 0);
+        const next = { ...p, stock_qty: Math.max(0, Number(p.stock_qty) - deduct) };
         upsertCached("products", next);
         return next;
       }));
@@ -316,7 +384,6 @@ export default function POS() {
         setFarmerBook((cur) => cur.map((x) => x.id === next.id ? next : x));
       }
       loadProducts(branchId);
-      refreshCustomers().then(setFarmerBook).catch(() => {});
     } catch (e: any) { setMsg({ text: e.message, ok: false }); }
   };
 
@@ -368,8 +435,16 @@ export default function POS() {
           <div className="product-grid">
             {filtered.map((p) => {
               const stock = stockOf(p);
+              const info = packInfo(p);
               const out = stock != null && stock <= 0;
               const low = stock != null && stock > 0 && stock <= Number(p.reorder_level || 0);
+              const stockLabel = out
+                ? "Out of stock"
+                : stock == null
+                  ? "Stock: —"
+                  : info.allowsLoose
+                    ? `Stock: ${stock} × ${info.saleUnit} (${Math.round(stock * info.packSize * 1000) / 1000}${info.looseUnit})`
+                    : `Stock: ${stock} ${unitOf(p)}`;
               return (
               <div key={p.id} className="product-tile-wrap">
                 <button type="button" className={`fav-star ${p.is_favorite ? "on" : ""}`} title={p.is_favorite ? "Unpin favorite" : "Pin as favorite"}
@@ -379,12 +454,18 @@ export default function POS() {
                 <button className={`product-tile ${p.is_favorite ? "fav" : ""} ${out ? "out" : ""}`} onClick={() => add(p)} disabled={out}>
                   <span className="cat-dot" style={{ background: CATEGORY_COLORS[p.category] || "#64748b" }} />
                   <span className="p-name">{p.name}</span>
-                  <span className="p-price">{inr(p.sale_price)}</span>
+                  <span className="p-price">{inr(p.sale_price)}{info.allowsLoose ? <span className="muted" style={{ fontWeight: 500, fontSize: 11 }}> / {info.saleUnit}</span> : null}</span>
                   <span className={`p-stock ${out ? "out" : low ? "low" : "ok"}`}>
-                    {out ? "Out of stock" : stock == null ? "Stock: —" : `Stock: ${stock} ${p.base_unit || ""}`}
+                    {stockLabel}
                   </span>
                   <span className="muted" style={{ fontSize: 11, textTransform: "capitalize" }}>{p.category} · {p.gst_rate}% GST</span>
                 </button>
+                {info.allowsLoose && (
+                  <button type="button" className="loose-chip" disabled={out} title={`Add 1 ${info.looseUnit} loose`}
+                    onClick={() => add(p, true)}>
+                    + {info.looseUnit}
+                  </button>
+                )}
               </div>
               );
             })}
@@ -403,19 +484,30 @@ export default function POS() {
         <Card title="Current Bill" icon={<CreditCard size={16} />}>
           <div className="table-wrap" style={{ marginBottom: 12 }}>
             <table>
-              <thead><tr><th>Item</th><th className="num">Qty</th><th className="num">Price</th><th className="num">Disc ₹</th><th className="num">Total</th><th></th></tr></thead>
+              <thead><tr><th>Item</th><th>Unit</th><th className="num">Qty</th><th className="num">Price</th><th className="num">Disc ₹</th><th className="num">Total</th><th></th></tr></thead>
               <tbody>
-                {lines.length === 0 && <tr><td colSpan={6} className="muted" style={{ textAlign: "center", padding: 24 }}>Tap products to add</td></tr>}
+                {lines.length === 0 && <tr><td colSpan={7} className="muted" style={{ textAlign: "center", padding: 24 }}>Tap products to add a bag, or +kg for loose</td></tr>}
                 {lines.map((l) => {
-                  const priced = totals.lines.find((x) => x.product_id === l.product_id);
+                  const priced = totals.lines.find((x) => x.key === l.key);
+                  const p = products.find((x) => x.id === l.product_id);
+                  const info = packInfo(p || { name: l.name, sale_unit: l.unit });
+                  const loose = info.allowsLoose && l.unit === info.looseUnit;
                   return (
-                    <tr key={l.product_id}>
+                    <tr key={l.key}>
                       <td>{l.name}</td>
-                      <td className="num"><input type="number" min={1} value={l.quantity} onChange={(e) => setQty(l.product_id, Number(e.target.value))} style={{ width: 56, padding: 6, textAlign: "right" }} /></td>
+                      <td>
+                        {info.allowsLoose ? (
+                          <select value={l.unit} onChange={(e) => setLineUnit(l.key, e.target.value)} style={{ width: 76, padding: 6 }}>
+                            <option value={info.saleUnit}>{info.saleUnit}</option>
+                            <option value={info.looseUnit || "kg"}>{info.looseUnit}</option>
+                          </select>
+                        ) : l.unit}
+                      </td>
+                      <td className="num"><input type="number" min={loose ? 0.01 : 0.001} step={loose ? 0.01 : 1} value={l.quantity} onChange={(e) => setQty(l.key, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
                       <td className="num">{inr(l.unit_price)}</td>
-                      <td className="num"><input type="number" min={0} step="0.01" value={l.discount || ""} placeholder="0" onChange={(e) => setLineDisc(l.product_id, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
+                      <td className="num"><input type="number" min={0} step="0.01" value={l.discount || ""} placeholder="0" onChange={(e) => setLineDisc(l.key, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
                       <td className="num">{inr(priced?.lineTotal ?? l.quantity * l.unit_price)}</td>
-                      <td><button className="icon-btn" style={{ width: 30, height: 30 }} onClick={() => remove(l.product_id)}><Trash2 size={14} /></button></td>
+                      <td><button className="icon-btn" style={{ width: 30, height: 30 }} onClick={() => remove(l.key)}><Trash2 size={14} /></button></td>
                     </tr>
                   );
                 })}

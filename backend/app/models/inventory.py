@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Numeric,
     String,
     UniqueConstraint,
@@ -74,6 +75,12 @@ class StockMovement(Base, PKMixin, TimestampMixin):
     """Append-only ledger of every stock change (auditable)."""
 
     __tablename__ = "stock_movement"
+    __table_args__ = (
+        Index(
+            "ix_stock_movement_org_prod_type_at",
+            "organization_id", "product_id", "movement_type", "occurred_at",
+        ),
+    )
 
     organization_id: Mapped[int] = mapped_column(
         ForeignKey("organization.id"), nullable=False, index=True
@@ -81,7 +88,7 @@ class StockMovement(Base, PKMixin, TimestampMixin):
     branch_id: Mapped[int] = mapped_column(
         ForeignKey("branch.id"), nullable=False, index=True
     )
-    product_id: Mapped[int] = mapped_column(ForeignKey("product.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(ForeignKey("product.id"), nullable=False, index=True)
     batch_id: Mapped[int] = mapped_column(ForeignKey("batch.id"), nullable=False)
 
     movement_type: Mapped[MovementType] = mapped_column(
@@ -93,5 +100,5 @@ class StockMovement(Base, PKMixin, TimestampMixin):
     # Reference to the source document (invoice id, GRN id, transfer id, ...).
     ref_type: Mapped[str | None] = mapped_column(String(40))
     ref_id: Mapped[int | None] = mapped_column()
-    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     note: Mapped[str | None] = mapped_column(String(255))

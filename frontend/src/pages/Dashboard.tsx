@@ -32,13 +32,18 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (preset === "custom" && (!custom.start || !custom.end)) return;
-    setD(null);
+    const ac = new AbortController();
     api.dashboard({
       branchId: branchId || undefined,
       preset,
       start: preset === "custom" ? custom.start : undefined,
       end: preset === "custom" ? custom.end : undefined,
-    }).then(setD).catch(() => setD({}));
+      signal: ac.signal,
+    }).then(setD).catch((e) => {
+      if (e?.name === "AbortError") return;
+      setD((cur: any) => cur || {});
+    });
+    return () => ac.abort();
   }, [branchId, preset, custom.start, custom.end]);
 
   const periodLabel = PERIODS.find((p) => p.id === preset)?.label || "This month";

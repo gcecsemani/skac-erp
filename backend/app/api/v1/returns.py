@@ -13,6 +13,7 @@ from app.core import rbac
 from app.core.audit import record_audit
 from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
+from app.core.units import billed_to_stock_qty
 from app.models.customer import Customer
 from app.models.enums import MovementType
 from app.models.product import Product
@@ -114,11 +115,13 @@ def create_credit_note(
             product_name=line.product_name, quantity=it.quantity,
             unit_price=line.unit_price, tax_amount=tax, line_total=line_total,
         ))
-        # Restock returned goods to the originating batch.
+        # Restock returned goods to the originating batch (pack qty).
         if line.batch_id:
+            product = db.get(Product, it.product_id)
+            stock_qty = billed_to_stock_qty(product, it.quantity, line.unit) if product else it.quantity
             inv.receive_stock(
                 db, organization_id=current.organization_id, branch_id=invoice.branch_id,
-                product_id=it.product_id, batch_id=line.batch_id, quantity=it.quantity,
+                product_id=it.product_id, batch_id=line.batch_id, quantity=stock_qty,
                 movement_type=MovementType.sale_return, ref_type="credit_note", ref_id=note.id)
         total += line_total
         taxable_total += taxable

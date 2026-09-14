@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -56,17 +56,20 @@ def _uploads() -> Path:
     return UPLOAD_DIR
 
 
-def _serialize(db: Session, v: FieldVisit) -> dict:
-    visitor = db.get(User, v.visited_by_user_id)
-    resolver = db.get(User, v.resolved_by_user_id) if v.resolved_by_user_id else None
-    branch = db.get(Branch, v.branch_id)
+def _serialize(
+    v: FieldVisit,
+    *,
+    branch_name: str | None = None,
+    visitor_name: str | None = None,
+    resolver_name: str | None = None,
+) -> dict:
     return {
         "id": v.id,
         "visit_no": v.visit_no,
         "branch_id": v.branch_id,
-        "branch_name": branch.name if branch else None,
+        "branch_name": branch_name,
         "visited_by_user_id": v.visited_by_user_id,
-        "visited_by": visitor.full_name if visitor else None,
+        "visited_by": visitor_name,
         "customer_id": v.customer_id,
         "visit_date": v.visit_date.isoformat(),
         "farmer_name": v.farmer_name,
@@ -80,7 +83,7 @@ def _serialize(db: Session, v: FieldVisit) -> dict:
         "prescription_notes": v.prescription_notes,
         "status": v.status.value,
         "resolution_note": v.resolution_note,
-        "resolved_by": resolver.full_name if resolver else None,
+        "resolved_by": resolver_name,
         "resolved_at": v.resolved_at.isoformat() if v.resolved_at else None,
         "photo_count": len(v.photos),
         "photos": [
@@ -92,6 +95,18 @@ def _serialize(db: Session, v: FieldVisit) -> dict:
             for p in v.photos
         ],
     }
+
+
+def _load_names(db: Session, v: FieldVisit) -> dict:
+    visitor = db.get(User, v.visited_by_user_id)
+    resolver = db.get(User, v.resolved_by_user_id) if v.resolved_by_user_id else None
+    branch = db.get(Branch, v.branch_id)
+    return _serialize(
+        v,
+        branch_name=branch.name if branch else None,
+        visitor_name=visitor.full_name if visitor else None,
+        resolver_name=resolver.full_name if resolver else None,
+    )
 
 
 def _owned(db: Session, visit_id: int, current: CurrentUser) -> FieldVisit:
@@ -124,7 +139,16 @@ def list_visits(
     current: CurrentUser = Depends(require_permission(rbac.P_FIELD_VISIT)),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    stmt = select(FieldVisit).where(FieldVisit.organization_id == current.organization_id)
+    Visitor = aliased(User)
+    Resolver = aliased(User)
+    stmt = (
+        select(FieldVisit, Branch.name, Visitor.full_name, Resolver.full_name)
+        .join(Branch, Branch.id == FieldVisit.branch_id)
+        .join(Visitor, Visitor.id == FieldVisit.visited_by_user_id)
+        .outerjoin(Resolver, Resolver.id == FieldVisit.resolved_by_user_id)
+        .options(selectinload(FieldVisit.photos))
+        .where(FieldVisit.organization_id == current.organization_id)
+    )
     if not current.sees_all_branches:
         stmt = stmt.where(FieldVisit.branch_id.in_(current.branch_ids or [-1]))
     if branch_id:
@@ -143,8 +167,11 @@ def list_visits(
             FieldVisit.village.ilike(like),
             FieldVisit.visit_no.ilike(like),
         ))
-    rows = db.scalars(stmt.order_by(FieldVisit.id.desc()).limit(limit)).all()
-    return [_serialize(db, v) for v in rows]
+    rows = db.execute(stmt.order_by(FieldVisit.id.desc()).limit(limit)).unique().all()
+    return [
+        _serialize(v, branch_name=bname, visitor_name=vname, resolver_name=rname)
+        for v, bname, vname, rname in rows
+    ]
 
 
 @router.post("", status_code=201)
@@ -207,7 +234,7 @@ def create_visit(
     )
     db.commit()
     db.refresh(visit)
-    return _serialize(db, visit)
+    return _load_names(db, visit)
 
 
 @router.get("/{visit_id}")
@@ -216,7 +243,7 @@ def get_visit(
     current: CurrentUser = Depends(require_permission(rbac.P_FIELD_VISIT)),
     db: Session = Depends(get_db),
 ) -> dict:
-    return _serialize(db, _owned(db, visit_id, current))
+    return _load_names(db, _owned(db, visit_id, current))
 
 
 @router.post("/{visit_id}/photos", status_code=201)
@@ -255,7 +282,7 @@ async def upload_photos(
         saved += 1
     db.commit()
     db.refresh(visit)
-    return {"uploaded": saved, "photos": _serialize(db, visit)["photos"]}
+    return {"uploaded": saved, "photos": _load_names(db, visit)["photos"]}
 
 
 @router.get("/{visit_id}/photos/{photo_id}")
@@ -314,7 +341,7 @@ def delete_photo(
     db.commit()
     _remove_visit_folder_if_empty(visit.id)
     db.refresh(visit)
-    return _serialize(db, visit)
+    return _load_names(db, visit)
 
 
 @router.delete("/{visit_id}/photos")
@@ -336,7 +363,7 @@ def delete_all_photos(
     if folder.exists():
         shutil.rmtree(folder, ignore_errors=True)
     db.refresh(visit)
-    return _serialize(db, visit)
+    return _load_names(db, visit)
 
 
 @router.post("/{visit_id}/complete")
@@ -360,7 +387,7 @@ def complete_visit(
     )
     db.commit()
     db.refresh(visit)
-    return _serialize(db, visit)
+    return _load_names(db, visit)
 
 
 @router.post("/{visit_id}/cancel")
@@ -384,4 +411,4 @@ def cancel_visit(
     )
     db.commit()
     db.refresh(visit)
-    return _serialize(db, visit)
+    return _load_names(db, visit)

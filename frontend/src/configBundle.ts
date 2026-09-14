@@ -85,6 +85,11 @@ export function useConfigBundle(): { bundle: ConfigBundle; ready: boolean } {
   }, []);
 
   useEffect(() => {
+    if (cache && tick === 0) {
+      setData(cache);
+      setReady(true);
+      return;
+    }
     let cancelled = false;
     api.configBundle()
       .then((b) => {

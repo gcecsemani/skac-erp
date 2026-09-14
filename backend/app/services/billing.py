@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.units import billed_to_stock_qty, is_loose_sale, loose_unit_price
 from app.models.customer import Customer
 from app.models.enums import InvoiceStatus, MovementType, PaymentMode, TaxType
 from app.models.organization import Branch
@@ -105,27 +106,41 @@ def create_and_finalize(
         if product is None:
             raise ValueError(f"Product {line.product_id} not found")
 
-        unit_price = line.unit_price if line.unit_price is not None else product.sale_price
+        billed_unit = line.unit or product.sale_unit
+        if line.unit_price is not None:
+            unit_price = line.unit_price
+        elif is_loose_sale(product, billed_unit):
+            unit_price = loose_unit_price(product.sale_price, product)
+        else:
+            unit_price = product.sale_price
         line_discount_in = Decimal(line.discount or 0)
         if line_discount_in < 0:
             raise ValueError("Discount cannot be negative")
-        if line_discount_in > (Decimal(line.quantity) * unit_price).quantize(TWOPLACES):
+        billed_qty = Decimal(line.quantity)
+        if line_discount_in > (billed_qty * unit_price).quantize(TWOPLACES):
             raise ValueError(f"Discount on {product.name} exceeds line amount")
 
-        allocations = inventory.allocate_fifo(
-            db,
-            branch_id=data.branch_id,
-            product_id=line.product_id,
-            quantity=line.quantity,
-            allow_oversell=allow_oversell,
-        )
+        stock_qty = billed_to_stock_qty(product, billed_qty, billed_unit)
+        try:
+            allocations = inventory.allocate_fifo(
+                db,
+                branch_id=data.branch_id,
+                product_id=line.product_id,
+                quantity=stock_qty,
+                allow_oversell=allow_oversell,
+            )
+        except inventory.InsufficientStock as exc:
+            exc.billed_unit = billed_unit
+            exc.billed_qty = billed_qty
+            raise
 
         # Spread the line-level discount proportionally across batch splits.
-        total_qty = sum((a.quantity for a in allocations), Decimal("0")) or Decimal("1")
+        total_stock = sum((a.quantity for a in allocations), Decimal("0")) or Decimal("1")
         for alloc in allocations:
-            portion = alloc.quantity / total_qty
+            portion = alloc.quantity / total_stock
+            billed_slice = (billed_qty * portion).quantize(Decimal("0.001"))
             line_discount = (Decimal(line.discount) * portion).quantize(TWOPLACES)
-            taxable = (alloc.quantity * unit_price - line_discount).quantize(TWOPLACES)
+            taxable = (billed_slice * unit_price - line_discount).quantize(TWOPLACES)
             tax_amount = (taxable * product.gst_rate / Decimal("100")).quantize(TWOPLACES)
             line_total = (taxable + tax_amount).quantize(TWOPLACES)
 
@@ -139,8 +154,8 @@ def create_and_finalize(
                     batch_no=alloc.batch_no,
                     mfg_date=alloc.mfg_date,
                     expiry_date=alloc.expiry_date,
-                    unit=line.unit or product.base_unit,
-                    quantity=alloc.quantity,
+                    unit=billed_unit,
+                    quantity=billed_slice,
                     unit_price=unit_price,
                     discount=line_discount,
                     gst_rate=product.gst_rate,

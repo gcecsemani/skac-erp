@@ -7,7 +7,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -326,23 +326,25 @@ def list_orders(
     limit: int = Query(100, ge=1, le=300),
     current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> list[dict]:
-    stmt = select(PurchaseOrder).where(
-        PurchaseOrder.organization_id == current.organization_id
+    stmt = (
+        select(PurchaseOrder, Vendor.name)
+        .join(Vendor, Vendor.id == PurchaseOrder.vendor_id)
+        .options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.organization_id == current.organization_id)
     )
     if not current.sees_all_branches:
         stmt = stmt.where(PurchaseOrder.branch_id.in_(current.branch_ids or [-1]))
     if search:
         like = f"%{search.strip()}%"
-        stmt = stmt.join(Vendor, Vendor.id == PurchaseOrder.vendor_id).where(
+        stmt = stmt.where(
             or_(PurchaseOrder.po_no.ilike(like), Vendor.name.ilike(like))
         )
     stmt = stmt.order_by(PurchaseOrder.id.desc()).limit(limit)
     out = []
-    for po in db.scalars(stmt).unique().all():
-        vendor = db.get(Vendor, po.vendor_id)
+    for po, vendor_name in db.execute(stmt).unique().all():
         out.append({
             "id": po.id, "po_no": po.po_no, "branch_id": po.branch_id,
-            "vendor": vendor.name if vendor else None,
+            "vendor": vendor_name,
             "order_date": po.order_date.isoformat(), "status": po.status.value,
             "expected_total": float(po.expected_total),
             "items": [{"product_id": i.product_id, "product_name": i.product_name,
@@ -475,12 +477,17 @@ def list_grn(
     limit: int = Query(100, ge=1, le=300),
     current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> list[dict]:
-    stmt = select(GRN).where(GRN.organization_id == current.organization_id)
+    stmt = (
+        select(GRN, Vendor.name)
+        .join(Vendor, Vendor.id == GRN.vendor_id)
+        .options(selectinload(GRN.items))
+        .where(GRN.organization_id == current.organization_id)
+    )
     if not current.sees_all_branches:
         stmt = stmt.where(GRN.branch_id.in_(current.branch_ids or [-1]))
     if search:
         like = f"%{search.strip()}%"
-        stmt = stmt.join(Vendor, Vendor.id == GRN.vendor_id).where(
+        stmt = stmt.where(
             or_(
                 GRN.grn_no.ilike(like),
                 GRN.vendor_invoice_no.ilike(like),
@@ -488,12 +495,11 @@ def list_grn(
             )
         )
     out = []
-    for g in db.scalars(stmt.order_by(GRN.id.desc()).limit(limit)).unique().all():
-        vendor = db.get(Vendor, g.vendor_id)
+    for g, vendor_name in db.execute(stmt.order_by(GRN.id.desc()).limit(limit)).unique().all():
         out.append({
             "id": g.id, "grn_no": g.grn_no, "branch_id": g.branch_id,
             "vendor_id": g.vendor_id,
-            "vendor": vendor.name if vendor else None,
+            "vendor": vendor_name,
             "received_date": g.received_date.isoformat(),
             "vendor_invoice_no": g.vendor_invoice_no, "total_value": float(g.total_value),
             "item_count": len(g.items),
@@ -536,7 +542,7 @@ def _serialize_grn(db: Session, g: GRN) -> dict:
             "product_id": it.product_id,
             "product_name": product.name if product else str(it.product_id),
             "hsn_code": product.hsn_code if product else None,
-            "packing": product.base_unit if product else None,
+            "packing": product.sale_unit if product else None,
             "gst_rate": float(product.gst_rate) if product else 0,
             "batch_id": it.batch_id,
             "batch_no": it.batch_no,
@@ -725,7 +731,7 @@ def create_purchase_return(
                 ),
             )
         gst_rate = product.gst_rate if product else Decimal("0")
-        packing = product.base_unit if product else None
+        packing = product.sale_unit if product else None
         hsn_code = product.hsn_code if product else None
         taxable, tax, line_total = _line_gst(it.quantity, line.unit_price, gst_rate)
         note.items.append(PurchaseReturnItem(

@@ -137,7 +137,7 @@ async function request<T>(path: string, options: RequestInit = {}, didRefresh = 
   return (await res.blob()) as T;
 }
 
-const get = <T,>(p: string) => request<T>(p);
+const get = <T,>(p: string, init?: RequestInit) => request<T>(p, init);
 const post = <T,>(p: string, body?: any) =>
   request<T>(p, { method: "POST", body: JSON.stringify(body ?? {}) });
 const put = <T,>(p: string, body?: any) =>
@@ -172,10 +172,11 @@ export const api = {
   updateProduct: (id: number, p: any) => put<any>(`/products/${id}`, p),
   deleteProduct: (id: number) => del(`/products/${id}`),
   setFavorite: (id: number, is_favorite: boolean) => post<any>(`/products/${id}/favorite`, { is_favorite }),
-  customers: (search?: string, limit?: number) => {
+  customers: (search?: string, limit?: number, outstandingOnly?: boolean) => {
     const p = new URLSearchParams();
     if (search) p.set("search", search);
     if (limit) p.set("limit", String(limit));
+    if (outstandingOnly) p.set("outstanding_only", "true");
     const q = p.toString();
     return get<any[]>(`/customers${q ? `?${q}` : ""}`);
   },
@@ -192,7 +193,7 @@ export const api = {
   createInvoice: (payload: any) => post<any>("/sales/invoices", payload),
   invoices: (opts?: number | {
     branchId?: number; start?: string; end?: string; search?: string;
-    paymentMode?: string; unpaidOnly?: boolean; limit?: number;
+    paymentMode?: string; unpaidOnly?: boolean; limit?: number; signal?: AbortSignal;
   }) => {
     const o = typeof opts === "number" ? { branchId: opts } : (opts || {});
     const p = new URLSearchParams();
@@ -204,11 +205,11 @@ export const api = {
     if (o.unpaidOnly) p.set("unpaid_only", "true");
     if (o.limit) p.set("limit", String(o.limit));
     const q = p.toString();
-    return get<any[]>(`/sales/invoices${q ? `?${q}` : ""}`);
+    return get<any[]>(`/sales/invoices${q ? `?${q}` : ""}`, o.signal ? { signal: o.signal } : undefined);
   },
   invoice: (id: number) => get<any>(`/sales/invoices/${id}`),
-  findInvoices: (q?: string) =>
-    get<any[]>(`/sales/invoices/find${q ? `?q=${encodeURIComponent(q)}` : ""}`),
+  findInvoices: (q?: string, signal?: AbortSignal) =>
+    get<any[]>(`/sales/invoices/find${q ? `?q=${encodeURIComponent(q)}` : ""}`, signal ? { signal } : undefined),
   syncInvoices: (invoices: any[]) => post<any[]>("/sales/sync", { invoices }),
 
   // returns
@@ -301,24 +302,24 @@ export const api = {
   payables: () => get<any>("/accounting/payables"),
 
   // reports
-  dashboard: (opts?: { branchId?: number; preset?: string; start?: string; end?: string }) => {
+  dashboard: (opts?: { branchId?: number; preset?: string; start?: string; end?: string; signal?: AbortSignal }) => {
     const p = new URLSearchParams();
     if (opts?.branchId) p.set("branch_id", String(opts.branchId));
     if (opts?.preset && opts.preset !== "custom") p.set("preset", opts.preset);
     if (opts?.start) p.set("start", opts.start);
     if (opts?.end) p.set("end", opts.end);
     const q = p.toString();
-    return get<any>(`/reports/dashboard${q ? `?${q}` : ""}`);
+    return get<any>(`/reports/dashboard${q ? `?${q}` : ""}`, opts?.signal ? { signal: opts.signal } : undefined);
   },
   stockValuation: (branchId?: number) => get<any>(`/reports/stock-valuation${branchId ? `?branch_id=${branchId}` : ""}`),
   movers: () => get<any>("/reports/movers"),
   farmerHistory: (id: number) => get<any>(`/reports/farmer/${id}/history`),
-  runReport: (type: string, opts?: { branchId?: number; start?: string; end?: string }) => {
+  runReport: (type: string, opts?: { branchId?: number; start?: string; end?: string; signal?: AbortSignal }) => {
     const p = new URLSearchParams({ type });
     if (opts?.branchId) p.set("branch_id", String(opts.branchId));
     if (opts?.start) p.set("start", opts.start);
     if (opts?.end) p.set("end", opts.end);
-    return get<any>(`/reports/table?${p}`);
+    return get<any>(`/reports/table?${p}`, opts?.signal ? { signal: opts.signal } : undefined);
   },
   customerPayment: (id: number, p: any) => post<any>(`/customers/${id}/payments`, p),
   customerLedger: (id: number) => get<any>(`/customers/${id}/ledger`),

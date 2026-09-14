@@ -158,25 +158,26 @@ def _daily_sales(db, org_id, scope, start, end) -> dict:
 
 
 def _monthly_sales(db, org_id, scope, start, end) -> dict:
-    stmt = _inv_filter(select(Invoice), org_id, scope, start, end)
-    buckets: dict[str, dict] = {}
-    for inv in db.scalars(stmt).all():
-        key = f"{inv.invoice_date.year}-{inv.invoice_date.month:02d}"
-        b = buckets.setdefault(key, {"bills": 0, "sales": 0.0, "tax": 0.0, "collected": 0.0})
-        b["bills"] += 1
-        b["sales"] += _n(inv.grand_total)
-        b["tax"] += _n(inv.tax_total)
-        b["collected"] += _n(inv.amount_paid)
+    year = func.extract("year", Invoice.invoice_date)
+    month = func.extract("month", Invoice.invoice_date)
+    stmt = _inv_filter(
+        select(
+            year, month,
+            func.count(Invoice.id),
+            func.coalesce(func.sum(Invoice.grand_total), 0),
+            func.coalesce(func.sum(Invoice.tax_total), 0),
+            func.coalesce(func.sum(Invoice.amount_paid), 0),
+        ),
+        org_id, scope, start, end,
+    ).group_by(year, month).order_by(year, month)
     rows = []
-    for key in sorted(buckets):
-        y, m = key.split("-")
-        b = buckets[key]
+    for y, m, bills, sales, tax, paid in db.execute(stmt):
         rows.append({
-            "month": f"{month_name[int(m)]} {y}",
-            "bills": b["bills"],
-            "sales": round(b["sales"], 2),
-            "tax": round(b["tax"], 2),
-            "collected": round(b["collected"], 2),
+            "month": f"{month_name[int(m)]} {int(y)}",
+            "bills": int(bills),
+            "sales": _n(sales),
+            "tax": _n(tax),
+            "collected": _n(paid),
         })
     return {
         "columns": [
@@ -619,41 +620,43 @@ def _gst(db, org_id, scope, start, end) -> dict:
 
 
 def _payment_collection(db, org_id, scope, start, end) -> dict:
-    inv_stmt = _inv_filter(select(Invoice), org_id, scope, start, end)
-    rows = []
-    for inv in db.scalars(inv_stmt).all():
-        paid = _n(inv.amount_paid)
-        if paid <= 0:
-            continue
-        rows.append({
-            "date": inv.invoice_date.isoformat(),
+    inv_stmt = _inv_filter(
+        select(Invoice.invoice_date, Invoice.invoice_no, Invoice.payment_mode, Invoice.amount_paid),
+        org_id, scope, start, end,
+    ).where(Invoice.amount_paid > 0).order_by(Invoice.invoice_date.desc(), Invoice.id.desc()).limit(1500)
+    rows = [
+        {
+            "date": d.isoformat(),
             "source": "Invoice",
-            "ref": inv.invoice_no,
-            "mode": _enum(inv.payment_mode).upper(),
-            "amount": paid,
-        })
+            "ref": no,
+            "mode": _enum(mode).upper(),
+            "amount": _n(paid),
+        }
+        for d, no, mode, paid in db.execute(inv_stmt)
+    ]
     pay_start = datetime.combine(start, datetime.min.time())
     pay_end = datetime.combine(end + timedelta(days=1), datetime.min.time())
-    pay_stmt = select(CustomerPayment, Customer.name).join(
+    pay_stmt = select(CustomerPayment.paid_at, Customer.name, CustomerPayment.id, CustomerPayment.mode, CustomerPayment.amount).join(
         Customer, Customer.id == CustomerPayment.customer_id
     ).where(
         CustomerPayment.organization_id == org_id,
         CustomerPayment.paid_at >= pay_start,
         CustomerPayment.paid_at < pay_end,
-    )
+    ).order_by(CustomerPayment.paid_at.desc()).limit(1500)
     if scope is not None:
         pay_stmt = pay_stmt.where(
             (CustomerPayment.branch_id.in_(scope)) | (CustomerPayment.branch_id.is_(None))
         )
-    for pay, name in db.execute(pay_stmt).all():
+    for paid_at, name, pid, mode, amount in db.execute(pay_stmt):
         rows.append({
-            "date": pay.paid_at.date().isoformat(),
+            "date": paid_at.date().isoformat(),
             "source": f"Khata · {name}",
-            "ref": f"PMT-{pay.id}",
-            "mode": (pay.mode or "cash").upper(),
-            "amount": _n(pay.amount),
+            "ref": f"PMT-{pid}",
+            "mode": (mode or "cash").upper(),
+            "amount": _n(amount),
         })
     rows.sort(key=lambda r: r["date"], reverse=True)
+    rows = rows[:2000]
     return {
         "columns": [
             {"key": "date", "label": "Date"},

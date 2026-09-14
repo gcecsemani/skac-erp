@@ -38,7 +38,7 @@ services:
     # and switch this command to: alembic upgrade head && uvicorn ...
     command: >
       sh -c "python -c 'from app.core.database import Base, engine; import app.models; Base.metadata.create_all(engine)' &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"
 
   frontend:
     build:

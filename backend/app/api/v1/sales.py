@@ -5,7 +5,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, joinedload, noload, selectinload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -56,6 +56,14 @@ def _invoice_out(inv: Invoice) -> InvoiceOut:
 def _invoice_load():
     return (
         selectinload(Invoice.items),
+        joinedload(Invoice.branch).joinedload(Branch.organization),
+        joinedload(Invoice.customer),
+    )
+
+
+def _invoice_list_load():
+    return (
+        noload(Invoice.items),
         joinedload(Invoice.branch).joinedload(Branch.organization),
         joinedload(Invoice.customer),
     )
@@ -123,16 +131,16 @@ def list_invoices(
     search: str | None = None,
     payment_mode: PaymentMode | None = None,
     unpaid_only: bool = False,
-    limit: int = Query(50, ge=1, le=2000),
+    limit: int = Query(50, ge=1, le=500),
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[InvoiceOut]:
     today = date.today()
-    start = start or today.replace(day=1)
+    start = start or today
     end = end or today
     stmt = (
         select(Invoice)
-        .options(*_invoice_load())
+        .options(*_invoice_list_load())
         .where(
             Invoice.organization_id == current.organization_id,
             Invoice.invoice_date >= start,
@@ -168,27 +176,67 @@ def find_invoices(
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[InvoiceOut]:
-    """Lookup by printed invoice no (AVL/2026-27/00003), numeric id, or farmer name. Not date-filtered."""
+    """Typeahead for credit notes: invoice no, farmer name, or phone. Not date-filtered.
+
+    Does not load line items (those are fetched on pick). Farmer matches go through
+    the customer table first so a name/phone search does not scan every invoice.
+    """
     needle = q.strip()
-    stmt = (
+    base = (
         select(Invoice)
-        .options(*_invoice_load())
-        .outerjoin(Customer, Invoice.customer_id == Customer.id)
+        .options(*_invoice_list_load())
         .where(Invoice.organization_id == current.organization_id)
     )
-    if needle:
-        like = f"%{needle}%"
-        conds = [
-            Invoice.invoice_no.ilike(like),
-            Customer.name.ilike(like),
-        ]
-        if needle.isdigit():
-            conds.append(Invoice.id == int(needle))
-        stmt = stmt.where(or_(*conds))
     if not current.sees_all_branches:
-        stmt = stmt.where(Invoice.branch_id.in_(current.branch_ids or [-1]))
-    stmt = stmt.order_by(Invoice.id.desc()).limit(limit)
-    return [_invoice_out(inv) for inv in db.scalars(stmt).unique().all()]
+        base = base.where(Invoice.branch_id.in_(current.branch_ids or [-1]))
+
+    if not needle:
+        stmt = base.order_by(Invoice.id.desc()).limit(limit)
+        return [_invoice_out(inv) for inv in db.scalars(stmt).unique().all()]
+
+    digits = "".join(ch for ch in needle if ch.isdigit())
+    has_alpha = any(ch.isalpha() for ch in needle)
+    looks_like_no = "/" in needle or needle.upper().startswith(("AVL", "INV"))
+    looks_like_phone = (not has_alpha) and len(digits) >= 8
+    looks_like_name = has_alpha and not looks_like_no
+
+    found: dict[int, Invoice] = {}
+
+    def take(stmt) -> None:
+        for inv in db.scalars(stmt).unique().all():
+            found.setdefault(inv.id, inv)
+
+    if looks_like_no or needle.isdigit() or not (looks_like_name or looks_like_phone):
+        no_conds = [Invoice.invoice_no.ilike(f"%{needle}%")]
+        if needle.isdigit():
+            no_conds.append(Invoice.id == int(needle))
+        take(base.where(or_(*no_conds)).order_by(Invoice.id.desc()).limit(limit))
+
+    if looks_like_name or looks_like_phone or (len(digits) >= 3 and not looks_like_no):
+        cust_conds = [
+            Customer.name.ilike(f"%{needle}%"),
+            Customer.phone.ilike(f"%{needle}%"),
+        ]
+        if digits and len(digits) >= 3:
+            cust_conds.append(Customer.phone.ilike(f"%{digits}%"))
+        cust_ids = list(
+            db.scalars(
+                select(Customer.id).where(
+                    Customer.organization_id == current.organization_id,
+                    Customer.is_deleted.is_(False),
+                    or_(*cust_conds),
+                ).limit(80)
+            ).all()
+        )
+        if cust_ids:
+            take(
+                base.where(Invoice.customer_id.in_(cust_ids))
+                .order_by(Invoice.id.desc())
+                .limit(limit)
+            )
+
+    rows = sorted(found.values(), key=lambda inv: inv.id, reverse=True)[:limit]
+    return [_invoice_out(inv) for inv in rows]
 
 
 @router.get("/invoices/{invoice_id}", response_model=InvoiceOut)

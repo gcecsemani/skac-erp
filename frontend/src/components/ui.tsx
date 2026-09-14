@@ -215,6 +215,7 @@ export function SearchSelect({
   getLabel = (o: any) => o.name,
   getId = (o: any) => o.id,
   onQuery,
+  loading,
   disabled,
   allowEmpty,
   emptyLabel = "None",
@@ -226,6 +227,7 @@ export function SearchSelect({
   getLabel?: (o: any) => string;
   getId?: (o: any) => number | string;
   onQuery?: (q: string) => void;
+  loading?: boolean;
   disabled?: boolean;
   allowEmpty?: boolean;
   emptyLabel?: string;
@@ -233,22 +235,29 @@ export function SearchSelect({
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<any>(null);
+  const [pending, setPending] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const queryTimer = useRef<number | null>(null);
   const fromList = options.find((o) => String(getId(o)) === String(value));
   const selected = fromList || (picked && String(getId(picked)) === String(value) ? picked : null);
   const closedLabel = selected ? getLabel(selected) : (value ? String(value) : "");
+  const busy = !!(loading || pending);
   const filtered = useMemo(() => {
+    if (onQuery) return options.slice(0, 80);
     const needle = q.trim().toLowerCase();
     const list = needle
       ? options.filter((o) => getLabel(o).toLowerCase().includes(needle))
       : options;
     return list.slice(0, 80);
-  }, [options, q, getLabel]);
+  }, [options, q, getLabel, onQuery]);
 
   useEffect(() => {
     if (fromList) setPicked(fromList);
   }, [fromList]);
+
+  useEffect(() => {
+    setPending(false);
+  }, [options, loading]);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -263,6 +272,7 @@ export function SearchSelect({
     onChange(id);
     setOpen(false);
     setQ("");
+    setPending(false);
   };
 
   return (
@@ -277,8 +287,9 @@ export function SearchSelect({
           setQ(next);
           setOpen(true);
           if (!onQuery) return;
+          setPending(true);
           if (queryTimer.current) window.clearTimeout(queryTimer.current);
-          queryTimer.current = window.setTimeout(() => onQuery(next), 250);
+          queryTimer.current = window.setTimeout(() => onQuery(next), 300);
         }}
       />
       {open && !disabled && (
@@ -301,8 +312,13 @@ export function SearchSelect({
               {emptyLabel}
             </button>
           )}
-          {filtered.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>No matches</div>}
-          {filtered.map((o) => (
+          {busy && (
+            <div className="muted" style={{ padding: "9px 12px", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+              <Loader2 size={14} className="spin" /> Searching…
+            </div>
+          )}
+          {!busy && filtered.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>No matches</div>}
+          {!busy && filtered.map((o) => (
             <button
               key={String(getId(o))}
               type="button"

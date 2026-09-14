@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, ShoppingCart, ReceiptText, Undo2, Users, Package,
@@ -9,26 +9,27 @@ import { useAuth } from "./auth";
 import { prefetchMasters } from "./offline";
 import { canAccessPath, homePath } from "./roles";
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
-import POS from "./pages/POS";
-import Invoices from "./pages/Invoices";
-import Returns from "./pages/Returns";
-import Customers from "./pages/Customers";
-import Products from "./pages/Products";
-import Stock from "./pages/Stock";
-import Transfers from "./pages/Transfers";
-import Purchasing from "./pages/Purchasing";
-import Accounting from "./pages/Accounting";
-import Reports from "./pages/Reports";
-import Assistant from "./pages/Assistant";
-import PurchaseAI from "./pages/PurchaseAI";
-import Compliance from "./pages/Compliance";
-import Admin from "./pages/Admin";
-import Branches from "./pages/Branches";
-import Expenses from "./pages/Expenses";
-import DayClose from "./pages/DayClose";
-import FieldVisits from "./pages/FieldVisits";
-import Config from "./pages/Config";
+
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const POS = lazy(() => import("./pages/POS"));
+const Invoices = lazy(() => import("./pages/Invoices"));
+const Returns = lazy(() => import("./pages/Returns"));
+const Customers = lazy(() => import("./pages/Customers"));
+const Products = lazy(() => import("./pages/Products"));
+const Stock = lazy(() => import("./pages/Stock"));
+const Transfers = lazy(() => import("./pages/Transfers"));
+const Purchasing = lazy(() => import("./pages/Purchasing"));
+const Accounting = lazy(() => import("./pages/Accounting"));
+const Reports = lazy(() => import("./pages/Reports"));
+const Assistant = lazy(() => import("./pages/Assistant"));
+const PurchaseAI = lazy(() => import("./pages/PurchaseAI"));
+const Compliance = lazy(() => import("./pages/Compliance"));
+const Admin = lazy(() => import("./pages/Admin"));
+const Branches = lazy(() => import("./pages/Branches"));
+const Expenses = lazy(() => import("./pages/Expenses"));
+const DayClose = lazy(() => import("./pages/DayClose"));
+const FieldVisits = lazy(() => import("./pages/FieldVisits"));
+const Config = lazy(() => import("./pages/Config"));
 
 const NAV = [
   { group: "Overview", items: [{ to: "/", label: "Dashboard", icon: LayoutDashboard, ownerOnly: true }] },
@@ -158,29 +159,31 @@ export default function App() {
           </div>
         </header>
         <div className="content">
-          <Routes>
-            <Route path="/" element={<Guard path="/"><Dashboard /></Guard>} />
-            <Route path="/pos" element={<Guard path="/pos"><POS /></Guard>} />
-            <Route path="/invoices" element={<Guard path="/invoices"><Invoices /></Guard>} />
-            <Route path="/returns" element={<Guard path="/returns"><Returns /></Guard>} />
-            <Route path="/customers" element={<Guard path="/customers"><Customers /></Guard>} />
-            <Route path="/field-visits" element={<Guard path="/field-visits"><FieldVisits /></Guard>} />
-            <Route path="/products" element={<Guard path="/products"><Products /></Guard>} />
-            <Route path="/stock" element={<Guard path="/stock"><Stock /></Guard>} />
-            <Route path="/transfers" element={<Guard path="/transfers"><Transfers /></Guard>} />
-            <Route path="/purchasing" element={<Guard path="/purchasing"><Purchasing /></Guard>} />
-            <Route path="/expenses" element={<Guard path="/expenses"><Expenses /></Guard>} />
-            <Route path="/day-close" element={<Guard path="/day-close"><DayClose /></Guard>} />
-            <Route path="/accounting" element={<Guard path="/accounting"><Accounting /></Guard>} />
-            <Route path="/reports" element={<Guard path="/reports"><Reports /></Guard>} />
-            <Route path="/assistant" element={<Guard path="/assistant"><Assistant /></Guard>} />
-            <Route path="/purchase-ai" element={<Guard path="/purchase-ai"><PurchaseAI /></Guard>} />
-            <Route path="/compliance" element={<Guard path="/compliance"><Compliance /></Guard>} />
-            <Route path="/branches" element={<Guard path="/branches"><Branches /></Guard>} />
-            <Route path="/config" element={<Guard path="/config"><Config /></Guard>} />
-            <Route path="/admin" element={<Guard path="/admin"><Admin /></Guard>} />
-            <Route path="*" element={<Navigate to={homePath(user)} replace />} />
-          </Routes>
+          <Suspense fallback={<div className="loading">Loading…</div>}>
+            <Routes>
+              <Route path="/" element={<Guard path="/"><Dashboard /></Guard>} />
+              <Route path="/pos" element={<Guard path="/pos"><POS /></Guard>} />
+              <Route path="/invoices" element={<Guard path="/invoices"><Invoices /></Guard>} />
+              <Route path="/returns" element={<Guard path="/returns"><Returns /></Guard>} />
+              <Route path="/customers" element={<Guard path="/customers"><Customers /></Guard>} />
+              <Route path="/field-visits" element={<Guard path="/field-visits"><FieldVisits /></Guard>} />
+              <Route path="/products" element={<Guard path="/products"><Products /></Guard>} />
+              <Route path="/stock" element={<Guard path="/stock"><Stock /></Guard>} />
+              <Route path="/transfers" element={<Guard path="/transfers"><Transfers /></Guard>} />
+              <Route path="/purchasing" element={<Guard path="/purchasing"><Purchasing /></Guard>} />
+              <Route path="/expenses" element={<Guard path="/expenses"><Expenses /></Guard>} />
+              <Route path="/day-close" element={<Guard path="/day-close"><DayClose /></Guard>} />
+              <Route path="/accounting" element={<Guard path="/accounting"><Accounting /></Guard>} />
+              <Route path="/reports" element={<Guard path="/reports"><Reports /></Guard>} />
+              <Route path="/assistant" element={<Guard path="/assistant"><Assistant /></Guard>} />
+              <Route path="/purchase-ai" element={<Guard path="/purchase-ai"><PurchaseAI /></Guard>} />
+              <Route path="/compliance" element={<Guard path="/compliance"><Compliance /></Guard>} />
+              <Route path="/branches" element={<Guard path="/branches"><Branches /></Guard>} />
+              <Route path="/config" element={<Guard path="/config"><Config /></Guard>} />
+              <Route path="/admin" element={<Guard path="/admin"><Admin /></Guard>} />
+              <Route path="*" element={<Navigate to={homePath(user)} replace />} />
+            </Routes>
+          </Suspense>
         </div>
       </div>
     </div>

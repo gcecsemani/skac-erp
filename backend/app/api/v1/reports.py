@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from time import monotonic
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.core import rbac
 from app.core.database import get_db
-from app.core.deps import CurrentUser, get_current_user, require_permission
+from app.core.deps import CurrentUser, require_permission
 from app.models.customer import Customer
-from app.models.enums import InvoiceStatus, MovementType, ProductCategory
+from app.models.enums import InvoiceStatus, MovementType
 from app.models.expense import Expense
 from app.models.inventory import Batch, Stock, StockMovement
 from app.models.organization import Branch
@@ -23,44 +23,32 @@ from app.services.report_tables import CATALOG, run_report
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
+_DASH_TTL_SEC = 20.0
+_dash_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _dash_get(key: tuple) -> dict | None:
+    hit = _dash_cache.get(key)
+    if hit and monotonic() - hit[0] < _DASH_TTL_SEC:
+        return hit[1]
+    return None
+
+
+def _dash_set(key: tuple, value: dict) -> dict:
+    _dash_cache[key] = (monotonic(), value)
+    if len(_dash_cache) > 64:
+        cutoff = monotonic() - _DASH_TTL_SEC
+        stale = [k for k, (ts, _) in _dash_cache.items() if ts < cutoff]
+        for k in stale:
+            _dash_cache.pop(k, None)
+    return value
+
 
 def _scope(current: CurrentUser, branch_id: int | None) -> list[int] | None:
     if branch_id is not None:
         current.assert_branch_access(branch_id)
         return [branch_id]
     return None if current.sees_all_branches else (current.branch_ids or [-1])
-
-
-def _sum_sales(db, org_id, scope, start, end) -> float:
-    stmt = select(func.coalesce(func.sum(Invoice.grand_total), 0)).where(
-        Invoice.organization_id == org_id,
-        Invoice.status == InvoiceStatus.finalized,
-        Invoice.invoice_date >= start, Invoice.invoice_date <= end,
-    )
-    if scope is not None:
-        stmt = stmt.where(Invoice.branch_id.in_(scope))
-    return float(db.scalar(stmt) or 0)
-
-
-def _sum_expenses(db, org_id, scope, start, end) -> float:
-    stmt = select(func.coalesce(func.sum(Expense.amount), 0)).where(
-        Expense.organization_id == org_id,
-        Expense.expense_date >= start, Expense.expense_date <= end,
-    )
-    if scope is not None:
-        stmt = stmt.where(Expense.branch_id.in_(scope))
-    return float(db.scalar(stmt) or 0)
-
-
-def _sum_collections(db, org_id, scope, start, end) -> float:
-    stmt = select(func.coalesce(func.sum(Invoice.amount_paid), 0)).where(
-        Invoice.organization_id == org_id,
-        Invoice.status == InvoiceStatus.finalized,
-        Invoice.invoice_date >= start, Invoice.invoice_date <= end,
-    )
-    if scope is not None:
-        stmt = stmt.where(Invoice.branch_id.in_(scope))
-    return float(db.scalar(stmt) or 0)
 
 
 def _period(preset: str | None, start: date | None, end: date | None) -> tuple[date, date, str]:
@@ -102,6 +90,19 @@ def _trend_points(start: date, end: date) -> list[tuple[date, date, str]]:
     return [(d, d, d.isoformat()) for i in range(days + 1) for d in [start + timedelta(days=i)]]
 
 
+def _sum_range(daily: dict[date, dict], start: date, end: date, key: str = "sales") -> tuple[float, int]:
+    total = 0.0
+    count = 0
+    cur = start
+    while cur <= end:
+        row = daily.get(cur)
+        if row:
+            total += row[key]
+            count += row["count"]
+        cur += timedelta(days=1)
+    return total, count
+
+
 @router.get("/dashboard")
 def dashboard(
     branch_id: int | None = None,
@@ -115,19 +116,43 @@ def dashboard(
     scope = _scope(current, branch_id)
     period_start, period_end, resolved = _period(preset, start, end)
     today = date.today()
+    fy_start = date(today.year if today.month >= 4 else today.year - 1, 4, 1)
+    cache_key = (org_id, tuple(scope) if scope is not None else None, resolved, period_start, period_end)
+    cached = _dash_get(cache_key)
+    if cached is not None:
+        return cached
 
-    sales_period = _sum_sales(db, org_id, scope, period_start, period_end)
-    sales_today = _sum_sales(db, org_id, scope, today, today)
+    trend_points = _trend_points(period_start, period_end)
+    span_start = min(fy_start, trend_points[0][0], period_start)
+    span_end = max(today, period_end)
 
-    inv_count = db.scalar(
-        select(func.count(Invoice.id)).where(
+    daily_stmt = (
+        select(
+            Invoice.invoice_date,
+            func.coalesce(func.sum(Invoice.grand_total), 0),
+            func.coalesce(func.sum(Invoice.amount_paid), 0),
+            func.count(Invoice.id),
+        )
+        .where(
             Invoice.organization_id == org_id,
             Invoice.status == InvoiceStatus.finalized,
-            Invoice.invoice_date >= period_start,
-            Invoice.invoice_date <= period_end,
-            *( [Invoice.branch_id.in_(scope)] if scope is not None else [] ),
+            Invoice.invoice_date >= span_start,
+            Invoice.invoice_date <= span_end,
         )
-    ) or 0
+        .group_by(Invoice.invoice_date)
+    )
+    if scope is not None:
+        daily_stmt = daily_stmt.where(Invoice.branch_id.in_(scope))
+    daily = {
+        d: {"sales": float(s or 0), "paid": float(p or 0), "count": int(c or 0)}
+        for d, s, p, c in db.execute(daily_stmt)
+    }
+
+    sales_period, inv_count = _sum_range(daily, period_start, period_end)
+    collections_period, _ = _sum_range(daily, period_start, period_end, "paid")
+    sales_today, _ = _sum_range(daily, today, today)
+    sales_ytd, _ = _sum_range(daily, fy_start, today)
+    trend = [{"date": label, "revenue": _sum_range(daily, a, b)[0]} for a, b, label in trend_points]
 
     gp_stmt = (
         select(
@@ -147,19 +172,17 @@ def dashboard(
     rev, cost = db.execute(gp_stmt).one()
     gross_profit = float(rev) - float(cost)
 
-    recv_stmt = select(func.coalesce(func.sum(Invoice.grand_total - Invoice.amount_paid), 0)).where(
+    recv_stmt = select(
+        func.coalesce(func.sum(Invoice.grand_total - Invoice.amount_paid), 0),
+        func.count(Invoice.id),
+    ).where(
         Invoice.organization_id == org_id,
         Invoice.status == InvoiceStatus.finalized,
         Invoice.grand_total > Invoice.amount_paid,
     )
     if scope is not None:
         recv_stmt = recv_stmt.where(Invoice.branch_id.in_(scope))
-    receivables_total = float(db.scalar(recv_stmt) or 0)
-
-    trend = [
-        {"date": label, "revenue": _sum_sales(db, org_id, scope, a, b)}
-        for a, b, label in _trend_points(period_start, period_end)
-    ]
+    receivables_total, unpaid_count = db.execute(recv_stmt).one()
 
     cat_stmt = (
         select(Product.category, func.coalesce(func.sum(InvoiceItem.line_total), 0))
@@ -180,16 +203,22 @@ def dashboard(
         for c, v in db.execute(cat_stmt).all()
     ]
 
-    branches = db.scalars(select(Branch).where(
-        Branch.organization_id == org_id, Branch.is_deleted.is_(False))).all()
-    branch_comparison = []
-    for b in branches:
-        if scope is not None and b.id not in scope:
-            continue
-        branch_comparison.append({
-            "branch": b.name,
-            "revenue": _sum_sales(db, org_id, [b.id], period_start, period_end),
-        })
+    branch_stmt = (
+        select(Branch.name, func.coalesce(func.sum(Invoice.grand_total), 0))
+        .outerjoin(Invoice, and_(
+            Invoice.branch_id == Branch.id,
+            Invoice.organization_id == org_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.invoice_date >= period_start,
+            Invoice.invoice_date <= period_end,
+        ))
+        .where(Branch.organization_id == org_id, Branch.is_deleted.is_(False))
+        .group_by(Branch.id, Branch.name)
+        .order_by(Branch.name)
+    )
+    if scope is not None:
+        branch_stmt = branch_stmt.where(Branch.id.in_(scope))
+    branch_comparison = [{"branch": name, "revenue": float(v or 0)} for name, v in db.execute(branch_stmt)]
 
     near_expiry = db.scalar(
         select(func.count(func.distinct(Batch.id)))
@@ -202,26 +231,29 @@ def dashboard(
         )
     ) or 0
 
-    expenses_period = _sum_expenses(db, org_id, scope, period_start, period_end)
-    collections_period = _sum_collections(db, org_id, scope, period_start, period_end)
-
-    exp_count = db.scalar(
-        select(func.count(Expense.id)).where(
+    exp_cat_stmt = (
+        select(
+            Expense.category,
+            func.coalesce(func.sum(Expense.amount), 0),
+            func.count(Expense.id),
+        )
+        .where(
             Expense.organization_id == org_id,
             Expense.expense_date >= period_start,
             Expense.expense_date <= period_end,
-            *( [Expense.branch_id.in_(scope)] if scope is not None else [] ),
         )
-    ) or 0
-
-    unpaid_count = db.scalar(
-        select(func.count(Invoice.id)).where(
-            Invoice.organization_id == org_id,
-            Invoice.status == InvoiceStatus.finalized,
-            Invoice.grand_total > Invoice.amount_paid,
-            *( [Invoice.branch_id.in_(scope)] if scope is not None else [] ),
-        )
-    ) or 0
+        .group_by(Expense.category)
+    )
+    if scope is not None:
+        exp_cat_stmt = exp_cat_stmt.where(Expense.branch_id.in_(scope))
+    expense_by_category = []
+    expenses_period = 0.0
+    exp_count = 0
+    for c, amount, cnt in db.execute(exp_cat_stmt):
+        amount_f = float(amount or 0)
+        expenses_period += amount_f
+        exp_count += int(cnt or 0)
+        expense_by_category.append({"category": c, "amount": amount_f})
 
     payables_stmt = select(func.coalesce(func.sum(Vendor.outstanding_balance), 0)).where(
         Vendor.organization_id == org_id,
@@ -237,22 +269,6 @@ def dashboard(
             Customer.outstanding_balance > 0,
         )
     ) or 0
-
-    exp_cat_stmt = (
-        select(Expense.category, func.coalesce(func.sum(Expense.amount), 0))
-        .where(
-            Expense.organization_id == org_id,
-            Expense.expense_date >= period_start,
-            Expense.expense_date <= period_end,
-        )
-        .group_by(Expense.category)
-    )
-    if scope is not None:
-        exp_cat_stmt = exp_cat_stmt.where(Expense.branch_id.in_(scope))
-    expense_by_category = [
-        {"category": c, "amount": float(v)}
-        for c, v in db.execute(exp_cat_stmt).all()
-    ]
 
     pay_stmt = (
         select(Invoice.payment_mode, func.coalesce(func.sum(Invoice.grand_total), 0))
@@ -271,28 +287,25 @@ def dashboard(
         for m, v in db.execute(pay_stmt).all()
     ]
 
-    return {
+    payload = {
         "preset": resolved,
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "sales_period": sales_period,
         "sales_today": sales_today,
-        "sales_mtd": sales_period,  # kept for older clients
-        "sales_ytd": _sum_sales(
-            db, org_id, scope,
-            date(today.year if today.month >= 4 else today.year - 1, 4, 1), today,
-        ),
+        "sales_mtd": sales_period,
+        "sales_ytd": sales_ytd,
         "invoice_count_today": int(inv_count),
         "invoice_count": int(inv_count),
         "gross_profit_mtd": round(gross_profit, 2),
         "gross_profit": round(gross_profit, 2),
-        "receivables_total": round(receivables_total, 2),
+        "receivables_total": round(float(receivables_total or 0), 2),
         "near_expiry_count": int(near_expiry),
         "expenses_period": round(expenses_period, 2),
         "expense_count": int(exp_count),
         "net_after_expenses": round(sales_period - expenses_period, 2),
         "collections_period": round(collections_period, 2),
-        "unpaid_invoice_count": int(unpaid_count),
+        "unpaid_invoice_count": int(unpaid_count or 0),
         "payables_total": round(payables_total, 2),
         "khata_farmer_count": int(khata_count),
         "expense_by_category": expense_by_category,
@@ -301,6 +314,7 @@ def dashboard(
         "category_split": category_split,
         "branch_comparison": branch_comparison,
     }
+    return _dash_set(cache_key, payload)
 
 
 @router.get("/stock-valuation")
@@ -363,20 +377,29 @@ def farmer_history(
     current: CurrentUser = Depends(require_permission(rbac.P_REPORT_VIEW)),
     db: Session = Depends(get_db),
 ) -> dict:
-    stmt = select(Invoice).where(
+    filt = (
         Invoice.organization_id == current.organization_id,
         Invoice.customer_id == customer_id,
-    ).order_by(Invoice.invoice_date.desc())
-    invoices = db.scalars(stmt).all()
+    )
+    invoice_count = int(db.scalar(select(func.count(Invoice.id)).where(*filt)) or 0)
+    total_purchased = float(db.scalar(select(func.coalesce(func.sum(Invoice.grand_total), 0)).where(*filt)) or 0)
+    rows = db.execute(
+        select(
+            Invoice.invoice_no, Invoice.invoice_date, Invoice.grand_total, Invoice.amount_paid,
+        )
+        .where(*filt)
+        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+        .limit(50)
+    ).all()
     return {
         "customer_id": customer_id,
-        "invoice_count": len(invoices),
-        "total_purchased": round(sum(float(i.grand_total) for i in invoices), 2),
+        "invoice_count": invoice_count,
+        "total_purchased": round(total_purchased, 2),
         "invoices": [
-            {"invoice_no": i.invoice_no, "date": i.invoice_date.isoformat(),
-             "total": float(i.grand_total),
-             "outstanding": float(i.grand_total - i.amount_paid)}
-            for i in invoices[:50]
+            {"invoice_no": no, "date": d.isoformat(),
+             "total": float(total),
+             "outstanding": float(total - paid)}
+            for no, d, total, paid in rows
         ],
     }
 

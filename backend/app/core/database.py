@@ -15,6 +15,9 @@ if _url.startswith("sqlite"):
     _kwargs["connect_args"] = {"check_same_thread": False}
 else:
     _kwargs["pool_recycle"] = 1800
+    _kwargs["pool_size"] = 10
+    _kwargs["max_overflow"] = 20
+    _kwargs["pool_timeout"] = 30
 
 engine = create_engine(_url, **_kwargs)
 
