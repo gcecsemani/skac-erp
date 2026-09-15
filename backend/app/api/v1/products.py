@@ -1,6 +1,8 @@
 """Product master management."""
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -13,6 +15,7 @@ from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.models.enums import ProductCategory
 from app.models.inventory import Stock
 from app.models.product import Product, ProductUnit
+from app.core.units import packing_from_name, pretty_pack
 from app.schemas.masters import ProductBase, ProductCreate, ProductOut
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -23,16 +26,43 @@ def _attrs_dict(product: Product) -> dict:
     return dict(extra or {})
 
 
+def _sync_packing_from_name(extra: dict, name: str | None) -> dict:
+    """Keep attributes.packing aligned with the name suffix (45KGS vs dump 50KGS)."""
+    raw = packing_from_name(name)
+    if not raw:
+        return extra
+    current = str(extra.get("packing") or "").strip()
+    if current and pretty_pack(current) == pretty_pack(raw):
+        return extra
+    extra["packing"] = raw
+    return extra
+
+
+def _store_pack_size(extra: dict, pack_size) -> dict:
+    if pack_size in (None, ""):
+        return extra
+    try:
+        size = Decimal(str(pack_size))
+    except Exception:
+        return extra
+    if size <= 0:
+        return extra
+    extra["pack_size"] = str(size)
+    extra["loose_unit"] = extra.get("loose_unit") or "kg"
+    return extra
+
+
 def _apply_product_fields(product: Product, data: dict) -> None:
     sell_loose = data.pop("sell_loose", None)
+    pack_size = data.pop("pack_size", None)
     data.pop("units", None)
     for key, value in data.items():
         setattr(product, key, value)
-    if sell_loose is None:
-        return
     extra = _attrs_dict(product)
-    extra["sell_loose"] = bool(sell_loose)
-    product.attributes = extra
+    if sell_loose is not None:
+        extra["sell_loose"] = bool(sell_loose)
+    extra = _store_pack_size(extra, pack_size)
+    product.attributes = _sync_packing_from_name(extra, product.name)
 
 
 @router.get("", response_model=list[ProductOut])
@@ -89,9 +119,13 @@ def create_product(
 ) -> Product:
     data = payload.model_dump(exclude={"units"})
     sell_loose = data.pop("sell_loose", None)
+    pack_size = data.pop("pack_size", None)
     product = Product(organization_id=current.organization_id, **data)
+    extra = _attrs_dict(product)
     if sell_loose is not None:
-        product.attributes = {**(_attrs_dict(product)), "sell_loose": bool(sell_loose)}
+        extra["sell_loose"] = bool(sell_loose)
+    extra = _store_pack_size(extra, pack_size)
+    product.attributes = _sync_packing_from_name(extra, product.name)
     for u in payload.units:
         product.units.append(ProductUnit(unit=u.unit, factor_to_base=u.factor_to_base))
     db.add(product)

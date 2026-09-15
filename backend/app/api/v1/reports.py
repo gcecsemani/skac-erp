@@ -19,7 +19,7 @@ from app.models.organization import Branch
 from app.models.product import Product
 from app.models.sales import Invoice, InvoiceItem
 from app.models.vendor import Vendor
-from app.services.report_tables import CATALOG, run_report
+from app.services.report_tables import run_report, visible_catalog
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -408,7 +408,7 @@ def farmer_history(
 def report_catalog(
     current: CurrentUser = Depends(require_permission(rbac.P_REPORT_VIEW)),
 ) -> list[dict]:
-    return CATALOG
+    return visible_catalog()
 
 
 @router.get("/table")

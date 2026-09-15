@@ -71,10 +71,9 @@ def _days_from(text: str, default: int = 30) -> int:
 
 def _match_report_key(q: str) -> str | None:
     aliases = [
-        ("farmer_loss", ("farmer loss", "farmers who lose")),
-        ("farmer_profit", ("farmer profit",)),
-        ("product_loss", ("product loss", "loss making product")),
-        ("product_profit", ("product profit",)),
+        ("inactive_khata", ("khata not visiting", "inactive khata", "stale khata")),
+        ("farmer_profit", ("farmer profit", "top farmers", "best farmers")),
+        ("product_profit", ("product profit", "product margin", "margin report")),
         ("field_visits", ("field visit",)),
         ("vendor_stock", ("vendor stock", "vendor-wise stock")),
         ("payment_collection", ("payment collection", "collections report")),

@@ -561,7 +561,7 @@ def list_capabilities(ctx: ToolContext) -> dict:
         if t.name != "list_capabilities"
     ]
     return _with_report(
-        {"reports": [c["label"] for c in report_tables.CATALOG]},
+        {"reports": [c["label"] for c in report_tables.visible_catalog()]},
         "What the assistant can look up",
         [
             {"key": "name", "label": "Topic"},

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Pencil, Trash2, Search, Star } from "lucide-react";
 import { api } from "../api";
-import { CATEGORY_COLORS, inr } from "../format";
+import { CATEGORY_COLORS, inr, parseWeight } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table } from "../components/ui";
 import { ConfigOptions, GstSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
@@ -12,7 +12,7 @@ const empty = {
   sku: "", name: "", category: "fertilizer", hsn_code: "", base_unit: "bag",
   gst_rate: "5", mrp: "", purchase_price: "", sale_price: "", reorder_level: "",
   npk_n: "", npk_p: "", npk_k: "", toxicity_class: "", germination_pct: "", seed_lot: "",
-  sell_loose: true,
+  sell_loose: true, pack_size: "",
 };
 
 export default function Products() {
@@ -54,6 +54,7 @@ export default function Products() {
       ...empty,
       ...Object.fromEntries(Object.keys(empty).map((k) => [k, r[k] ?? ""])),
       sell_loose: !!r.allows_loose,
+      pack_size: r.pack_size > 1 ? String(r.pack_size) : "",
     });
     setOpen(true);
   };
@@ -76,6 +77,9 @@ export default function Products() {
       V.nonNegative(form.sale_price || 0, "Sale price"),
       V.nonNegative(form.purchase_price || 0, "Purchase price"),
       V.nonNegative(form.mrp || 0, "MRP"),
+      form.sell_loose && !(Number(form.pack_size) > 1) && !parseWeight(form.name)
+        ? "Enter bag size in kg (50, 45, 25, …) or put it in the name, e.g. UREA - 45KGS."
+        : null,
     );
     if (msg) { setErr(msg); return; }
     const numify = (v: any) => (v === "" || v == null ? null : Number(v));
@@ -88,6 +92,7 @@ export default function Products() {
       toxicity_class: form.toxicity_class || null, germination_pct: numify(form.germination_pct),
       seed_lot: form.seed_lot || null,
       sell_loose: form.sell_loose !== "" && form.sell_loose != null ? !!form.sell_loose : undefined,
+      pack_size: Number(form.pack_size) > 1 ? Number(form.pack_size) : (parseWeight(form.name)?.[0] || undefined),
     };
     try {
       const saved = editId ? await api.updateProduct(editId, payload) : await api.createProduct(payload);
@@ -146,6 +151,9 @@ export default function Products() {
             { key: "hsn_code", label: "HSN" },
             { key: "gst_rate", label: "GST%", num: true },
             { key: "sale_price", label: "Sale", num: true, render: (r) => inr(r.sale_price) },
+            { key: "pack", label: "Pack", render: (r) => r.allows_loose
+              ? <span>{r.pack_size}{r.loose_unit} <Badge tone="info">loose kg</Badge></span>
+              : (r.sale_unit || r.base_unit || "—") },
             { key: "reorder_level", label: "Reorder", num: true },
             { key: "actions", label: "", render: (r) => (
               <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
@@ -166,7 +174,11 @@ export default function Products() {
           {err && <div className="error">{err}</div>}
           <div className="grid grid-2">
             <Field label="SKU" required><input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} /></Field>
-            <Field label="Name" required><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+            <Field label="Name" required><input value={form.name} onChange={(e) => {
+              const name = e.target.value;
+              const w = parseWeight(name);
+              setForm({ ...form, name, pack_size: form.pack_size || (w && w[0] > 1 ? String(w[0]) : form.pack_size) });
+            }} /></Field>
             <Field label="Category">
               <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
                 <option value="fertilizer">Fertilizer</option><option value="pesticide">Pesticide</option><option value="seed">Seed</option>
@@ -212,8 +224,20 @@ export default function Products() {
           <label className="row" style={{ gap: 8, cursor: "pointer", width: "auto", marginBottom: 12 }}>
             <input type="checkbox" style={{ width: "auto" }} checked={!!form.sell_loose}
               onChange={(e) => setForm({ ...form, sell_loose: e.target.checked })} />
-            Also sell loose by kg (open a 50kg bag and bill 1 kg, 5 kg, …)
+            Also sell loose by kg (open this bag and bill 1 kg, 5 kg, …)
           </label>
+          {!!form.sell_loose && (
+            <Field label="Bag size (kg)">
+              <input type="number" min={0.001} step="0.001" value={form.pack_size}
+                placeholder="e.g. 50, 45 or 25"
+                onChange={(e) => setForm({ ...form, pack_size: e.target.value })} />
+            </Field>
+          )}
+          {!!form.sell_loose && (
+            <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>
+              Any bag size works. Stock is counted in bags — selling 1 kg from a 50 kg bag reduces 0.02 bag; from 25 kg, 0.04 bag.
+            </p>
+          )}
 
           {form.category === "fertilizer" && (
             <div className="grid grid-3">

@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer, CustomerPayment
@@ -21,28 +21,57 @@ from app.models.sales import Invoice, InvoiceItem
 from app.models.user import User
 from app.models.vendor import Vendor
 
-CATALOG = [
-    {"key": "daily_sales", "label": "Daily sales", "needs_dates": True},
-    {"key": "monthly_sales", "label": "Monthly sales", "needs_dates": True},
-    {"key": "purchase", "label": "Purchase report", "needs_dates": True},
-    {"key": "product_sales", "label": "Product sales", "needs_dates": True},
-    {"key": "category_sales", "label": "Category sales", "needs_dates": True},
-    {"key": "profit_loss", "label": "Profit & Loss", "needs_dates": True},
-    {"key": "inventory", "label": "Inventory report", "needs_dates": False},
-    {"key": "stock_movement", "label": "Stock movement", "needs_dates": True},
-    {"key": "expiry", "label": "Expiry report", "needs_dates": False},
-    {"key": "low_stock", "label": "Low-stock report", "needs_dates": False},
-    {"key": "customer_outstanding", "label": "Customer outstanding", "needs_dates": False},
-    {"key": "supplier_outstanding", "label": "Supplier outstanding", "needs_dates": False},
-    {"key": "gst", "label": "GST report", "needs_dates": True},
-    {"key": "payment_collection", "label": "Payment collection", "needs_dates": True},
-    {"key": "vendor_stock", "label": "Vendor-wise stock", "needs_dates": False},
-    {"key": "field_visits", "label": "Field visit report", "needs_dates": True},
-    {"key": "product_profit", "label": "Product profit", "needs_dates": True},
-    {"key": "product_loss", "label": "Product loss", "needs_dates": True},
-    {"key": "farmer_profit", "label": "Farmer profit", "needs_dates": True},
-    {"key": "farmer_loss", "label": "Farmer loss", "needs_dates": True},
+GROUPS = [
+    {"id": "sales", "label": "Sales & margin"},
+    {"id": "collections", "label": "Cash & khata"},
+    {"id": "buying", "label": "Buying"},
+    {"id": "stock", "label": "Stock"},
+    {"id": "accounts", "label": "GST & P&L"},
 ]
+
+CATALOG = [
+    {"key": "daily_sales", "label": "Sales by day", "group": "sales", "needs_dates": True,
+     "blurb": "Bills, cash collected, and new khata each day. Use this to check a counter or a slow week."},
+    {"key": "monthly_sales", "label": "Sales by month", "group": "sales", "needs_dates": True,
+     "blurb": "Month-on-month sales. Fertilizer peaks around season — this shows whether this year is ahead or behind."},
+    {"key": "product_sales", "label": "What sold", "group": "sales", "needs_dates": True,
+     "blurb": "Which SKUs brought money. Push the winners; stop filling shelves with items nobody buys."},
+    {"key": "product_profit", "label": "Product margin", "group": "sales", "needs_dates": True,
+     "blurb": "Profit after cost, per product. High sales with thin or negative margin is a problem, not a win."},
+    {"key": "farmer_profit", "label": "Top farmers", "group": "sales", "needs_dates": True,
+     "blurb": "Who buys from you and how much margin those bills leave. Your best farmers to keep close."},
+    {"key": "customer_outstanding", "label": "Khata outstanding", "group": "collections", "needs_dates": False,
+     "blurb": "Everyone who still owes the shop. Call the top of this list first."},
+    {"key": "inactive_khata", "label": "Khata not visiting", "group": "collections", "needs_dates": False,
+     "blurb": "Farmers who owe money and have not billed in 30 days. These balances go stale unless you follow up."},
+    {"key": "payment_collection", "label": "Money collected", "group": "collections", "needs_dates": True,
+     "blurb": "Cash, UPI and khata receipts in the period. Match this to day close and the bank."},
+    {"key": "purchase", "label": "Purchases", "group": "buying", "needs_dates": True,
+     "blurb": "Goods received from suppliers. Check what came in versus what is selling."},
+    {"key": "supplier_outstanding", "label": "Supplier payables", "group": "buying", "needs_dates": False,
+     "blurb": "What the shop still owes vendors. Pay these before credit is blocked."},
+    {"key": "inventory", "label": "Stock on hand", "group": "stock", "needs_dates": False,
+     "blurb": "Quantity and rupee value sitting in each shop. Capital locked in bags and bottles."},
+    {"key": "expiry", "label": "Expiry risk", "group": "stock", "needs_dates": False,
+     "blurb": "Batches expiring in 60 days. Sell, return, or write off before they become unsaleable."},
+    {"key": "low_stock", "label": "Reorder", "group": "stock", "needs_dates": False,
+     "blurb": "Out of stock or below reorder level. These are lost sales if a farmer walks in tomorrow."},
+    {"key": "gst", "label": "GST", "group": "accounts", "needs_dates": True,
+     "blurb": "Taxable value and tax by slab. Hand this to your CA for the return."},
+    {"key": "profit_loss", "label": "Profit & loss", "group": "accounts", "needs_dates": True,
+     "blurb": "Sales minus GST, product cost, and expenses. The number that says whether the shop made money."},
+    # Kept for AI / old links; not shown on the Reports screen.
+    {"key": "category_sales", "label": "Category sales", "needs_dates": True, "nav": False},
+    {"key": "stock_movement", "label": "Stock movement", "needs_dates": True, "nav": False},
+    {"key": "vendor_stock", "label": "Vendor-wise stock", "needs_dates": True, "nav": False},
+    {"key": "field_visits", "label": "Field visit report", "needs_dates": True, "nav": False},
+    {"key": "product_loss", "label": "Product loss", "needs_dates": True, "nav": False},
+    {"key": "farmer_loss", "label": "Farmer loss", "needs_dates": True, "nav": False},
+]
+
+
+def visible_catalog() -> list[dict]:
+    return [c for c in CATALOG if c.get("nav", True)]
 
 
 def _n(v) -> float:
@@ -91,6 +120,7 @@ def run_report(
         "product_loss": _product_loss,
         "farmer_profit": _farmer_profit,
         "farmer_loss": _farmer_loss,
+        "inactive_khata": _inactive_khata,
     }
     fn = builders.get(key)
     if fn is None:
@@ -234,30 +264,34 @@ def _product_sales(db, org_id, scope, start, end) -> dict:
         select(
             InvoiceItem.product_id,
             InvoiceItem.product_name,
+            Product.category,
             func.coalesce(func.sum(InvoiceItem.quantity), 0),
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
             func.coalesce(func.sum(InvoiceItem.tax_amount), 0),
             func.coalesce(func.sum(InvoiceItem.line_total), 0),
         )
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+        .outerjoin(Product, Product.id == InvoiceItem.product_id)
     )
     stmt = _inv_filter(stmt, org_id, scope, start, end)
-    stmt = stmt.group_by(InvoiceItem.product_id, InvoiceItem.product_name).order_by(
+    stmt = stmt.group_by(InvoiceItem.product_id, InvoiceItem.product_name, Product.category).order_by(
         func.sum(InvoiceItem.line_total).desc()
     )
     rows = [
         {
             "product": name,
+            "category": _enum(cat).replace("_", " ").title() if cat else "—",
             "qty": _qty(qty),
             "taxable": _n(taxable),
             "tax": _n(tax),
             "amount": _n(total),
         }
-        for _pid, name, qty, taxable, tax, total in db.execute(stmt).all()
+        for _pid, name, cat, qty, taxable, tax, total in db.execute(stmt).all()
     ]
     return {
         "columns": [
             {"key": "product", "label": "Product"},
+            {"key": "category", "label": "Category"},
             {"key": "qty", "label": "Qty sold", "num": True},
             {"key": "taxable", "label": "Taxable", "num": True, "money": True},
             {"key": "tax", "label": "GST", "num": True, "money": True},
@@ -529,29 +563,116 @@ def _low_stock(db, org_id, scope, start, end) -> dict:
 
 
 def _customer_outstanding(db, org_id, scope, start, end) -> dict:
-    rows = db.scalars(select(Customer).where(
-        Customer.organization_id == org_id,
-        Customer.is_deleted.is_(False),
-        Customer.outstanding_balance > 0,
-    ).order_by(Customer.outstanding_balance.desc())).all()
-    data = [
-        {
+    last_sale = (
+        select(
+            Invoice.customer_id,
+            func.max(Invoice.invoice_date).label("last_date"),
+        )
+        .where(
+            Invoice.organization_id == org_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.customer_id.is_not(None),
+        )
+        .group_by(Invoice.customer_id)
+    )
+    if scope is not None:
+        last_sale = last_sale.where(Invoice.branch_id.in_(scope))
+    last_sale = last_sale.subquery()
+    rows = db.execute(
+        select(Customer, last_sale.c.last_date)
+        .outerjoin(last_sale, last_sale.c.customer_id == Customer.id)
+        .where(
+            Customer.organization_id == org_id,
+            Customer.is_deleted.is_(False),
+            Customer.outstanding_balance > 0,
+        )
+        .order_by(Customer.outstanding_balance.desc())
+    ).all()
+    today = date.today()
+    data = []
+    for c, last_date in rows:
+        data.append({
             "customer": c.name,
             "phone": c.phone or "—",
             "village": c.village or "—",
             "outstanding": _n(c.outstanding_balance),
-        }
-        for c in rows
-    ]
+            "last_bill": last_date.isoformat() if last_date else "Never",
+            "days_idle": (today - last_date).days if last_date else None,
+        })
     return {
         "columns": [
             {"key": "customer", "label": "Farmer"},
             {"key": "phone", "label": "Phone"},
             {"key": "village", "label": "Village"},
             {"key": "outstanding", "label": "Outstanding", "num": True, "money": True},
+            {"key": "last_bill", "label": "Last bill"},
+            {"key": "days_idle", "label": "Days since bill", "num": True},
         ],
         "rows": data,
-        "summary": [{"label": "Receivable", "value": round(sum(r["outstanding"] for r in data), 2), "money": True}],
+        "summary": [
+            {"label": "Farmers", "value": len(data)},
+            {"label": "Receivable", "value": round(sum(r["outstanding"] for r in data), 2), "money": True},
+        ],
+    }
+
+
+def _inactive_khata(db, org_id, scope, start, end) -> dict:
+    """Khata farmers with no bill in the last 30 days (as of the report end date)."""
+    days = 30
+    cutoff = end - timedelta(days=days)
+    last_sale = (
+        select(
+            Invoice.customer_id,
+            func.max(Invoice.invoice_date).label("last_date"),
+            func.count(Invoice.id).label("bills"),
+        )
+        .where(
+            Invoice.organization_id == org_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.customer_id.is_not(None),
+        )
+        .group_by(Invoice.customer_id)
+    )
+    if scope is not None:
+        last_sale = last_sale.where(Invoice.branch_id.in_(scope))
+    last_sale = last_sale.subquery()
+    stmt = (
+        select(Customer, last_sale.c.last_date, last_sale.c.bills)
+        .outerjoin(last_sale, last_sale.c.customer_id == Customer.id)
+        .where(
+            Customer.organization_id == org_id,
+            Customer.is_deleted.is_(False),
+            Customer.outstanding_balance > 0,
+            or_(last_sale.c.last_date.is_(None), last_sale.c.last_date <= cutoff),
+        )
+        .order_by(Customer.outstanding_balance.desc())
+    )
+    data = []
+    for c, last_date, bills in db.execute(stmt).all():
+        data.append({
+            "customer": c.name,
+            "phone": c.phone or "—",
+            "village": c.village or "—",
+            "outstanding": _n(c.outstanding_balance),
+            "last_bill": last_date.isoformat() if last_date else "Never",
+            "days_idle": (end - last_date).days if last_date else None,
+            "bills": int(bills or 0),
+        })
+    return {
+        "columns": [
+            {"key": "customer", "label": "Farmer"},
+            {"key": "phone", "label": "Phone"},
+            {"key": "village", "label": "Village"},
+            {"key": "outstanding", "label": "Outstanding", "num": True, "money": True},
+            {"key": "last_bill", "label": "Last bill"},
+            {"key": "days_idle", "label": "Days idle", "num": True},
+            {"key": "bills", "label": "Lifetime bills", "num": True},
+        ],
+        "rows": data,
+        "summary": [
+            {"label": "Farmers to call", "value": len(data)},
+            {"label": "Stuck khata", "value": round(sum(r["outstanding"] for r in data), 2), "money": True},
+        ],
     }
 
 
@@ -799,6 +920,7 @@ def _product_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
         })
     rows.sort(key=lambda r: r["profit"], reverse=not lowest)
     profit_sum = round(sum(r["profit"] for r in rows), 2)
+    losers = sum(1 for r in rows if r["profit"] < 0)
     return {
         "columns": [
             {"key": "product", "label": "Product"},
@@ -810,7 +932,10 @@ def _product_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
             {"key": "margin_pct", "label": "Margin %", "num": True},
         ],
         "rows": rows,
-        "summary": [{"label": "Profit", "value": profit_sum, "money": True}],
+        "summary": [
+            {"label": "Profit", "value": profit_sum, "money": True},
+            {"label": "Loss-making SKUs", "value": losers},
+        ],
     }
 
 

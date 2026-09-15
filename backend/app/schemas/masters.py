@@ -107,6 +107,7 @@ class ProductBase(BaseModel):
     germination_pct: Decimal | None = None
     seed_lot: str | None = None
     sell_loose: bool | None = None
+    pack_size: Decimal | None = Field(default=None, gt=0)
 
 
 class ProductCreate(ProductBase):

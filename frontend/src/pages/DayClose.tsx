@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { Banknote, Landmark, CheckCircle2, AlertTriangle } from "lucide-react";
 import { api } from "../api";
-import { inr } from "../format";
+import { inr, localISODate } from "../format";
 import { Badge, BranchSelect, Card, Field, Loading, PageHeader, StatCard, Table } from "../components/ui";
 import * as V from "../validate";
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => localISODate();
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 function tone(v: number) {
@@ -178,7 +178,7 @@ export default function DayClose() {
             </div>
           )}
           <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-            Sales on khata do not go into cash or UPI. Credit bills show under “On khata (new)”.
+            Sales on khata do not go into cash or UPI. Credit bills show under “On khata (new)”. Collections against old credit bills show as “Khata collected”.
           </p>
         </Card>
       </div>

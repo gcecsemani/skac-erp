@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Trash2, Wifi, WifiOff, RefreshCw, CreditCard, CheckCircle2, User, X, UserPlus, Star, Printer } from "lucide-react";
 import { api } from "../api";
-import { CATEGORY_COLORS, billedToStock, inr, loosePrice, packInfo, saleUnit } from "../format";
+import { CATEGORY_COLORS, billedToStock, formatPackStock, inr, loosePrice, packInfo, saleUnit } from "../format";
 import { printThermalReceipt } from "../print";
 import { Card, PageHeader, Badge, Modal, Field, Switch } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
@@ -442,9 +442,7 @@ export default function POS() {
                 ? "Out of stock"
                 : stock == null
                   ? "Stock: —"
-                  : info.allowsLoose
-                    ? `Stock: ${stock} × ${info.saleUnit} (${Math.round(stock * info.packSize * 1000) / 1000}${info.looseUnit})`
-                    : `Stock: ${stock} ${unitOf(p)}`;
+                  : `Stock: ${formatPackStock(stock, info)}`;
               return (
               <div key={p.id} className="product-tile-wrap">
                 <button type="button" className={`fav-star ${p.is_favorite ? "on" : ""}`} title={p.is_favorite ? "Unpin favorite" : "Pin as favorite"}

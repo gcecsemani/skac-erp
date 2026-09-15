@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.customer import CustomerPayment
 from app.models.day_close import DayClose
-from app.models.enums import InvoiceStatus, PaymentMode
+from app.models.enums import InvoiceStatus
 from app.models.expense import Expense
+from app.models.organization import Branch
 from app.models.purchase import VendorPayment
 from app.models.sales import Invoice
 
@@ -41,6 +42,43 @@ def _add(dest: dict[str, Decimal], key: str, amount: Decimal) -> None:
     dest[key] = dest.get(key, Decimal("0")) + amount
 
 
+def _payment_shop_date(paid_at: datetime | None) -> date | None:
+    """Calendar date a receipt belongs to for day close.
+
+    New collections store local `datetime.now()`. Older rows used UTC.
+    If treating the naive timestamp as UTC lands on today or yesterday,
+    use that local date so an evening collection is not lost after UTC midnight.
+    """
+    if paid_at is None:
+        return None
+    stored = paid_at.date() if hasattr(paid_at, "date") else paid_at
+    try:
+        naive = paid_at.replace(tzinfo=None) if getattr(paid_at, "tzinfo", None) else paid_at
+        local_from_utc = naive.replace(tzinfo=timezone.utc).astimezone().date()
+    except Exception:
+        return stored
+    today = date.today()
+    if local_from_utc in {today, today - timedelta(days=1)}:
+        return local_from_utc
+    return stored
+
+
+def _infer_payment_branch(db: Session, payment: CustomerPayment) -> int | None:
+    """Attribute an untagged khata receipt to the farmer's latest billed shop."""
+    if payment.branch_id is not None:
+        return payment.branch_id
+    return db.scalar(
+        select(Invoice.branch_id)
+        .where(
+            Invoice.customer_id == payment.customer_id,
+            Invoice.organization_id == payment.organization_id,
+            Invoice.status == InvoiceStatus.finalized,
+        )
+        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+        .limit(1)
+    )
+
+
 def compute_expected(
     db: Session,
     *,
@@ -51,6 +89,8 @@ def compute_expected(
 ) -> dict:
     start_dt = datetime.combine(close_date, datetime.min.time())
     end_dt = datetime.combine(close_date + timedelta(days=1), datetime.min.time())
+    pay_start = start_dt - timedelta(days=1)
+    pay_end = end_dt + timedelta(days=1)
 
     in_by: dict[str, Decimal] = {}
     out_by: dict[str, Decimal] = {}
@@ -71,24 +111,36 @@ def compute_expected(
         bills += 1
         sales += _n(inv.grand_total)
         paid = _n(inv.amount_paid)
+        due = _n(inv.grand_total) - paid
+        khata_new += due
+        # Credit bills are unpaid at the till. Later farmer receipts are
+        # CustomerPayment rows (khata_collected). Do not treat amount_paid
+        # that was allocated onto a credit invoice as cash taken at billing.
+        if _mode_str(inv.payment_mode) == "credit":
+            continue
         collected_inv += paid
-        khata_new += _n(inv.grand_total) - paid
         if paid > 0:
             _add(in_by, _bucket(inv.payment_mode), paid)
 
     pay_stmt = select(CustomerPayment).where(
         CustomerPayment.organization_id == org_id,
-        CustomerPayment.paid_at >= start_dt,
-        CustomerPayment.paid_at < end_dt,
+        CustomerPayment.paid_at >= pay_start,
+        CustomerPayment.paid_at < pay_end,
     )
+    branch_count = db.scalar(
+        select(func.count(Branch.id)).where(Branch.organization_id == org_id)
+    ) or 0
     khata_collected = Decimal("0")
     for p in db.scalars(pay_stmt).all():
+        if _payment_shop_date(p.paid_at) != close_date:
+            continue
         amt = _n(p.amount)
-        if p.branch_id == branch_id:
+        effective = _infer_payment_branch(db, p)
+        if effective == branch_id:
             khata_collected += amt
             _add(in_by, _bucket(p.mode), amt)
-        elif p.branch_id is None:
-            if include_unscoped:
+        elif effective is None:
+            if include_unscoped or branch_count <= 1:
                 khata_collected += amt
                 _add(in_by, _bucket(p.mode), amt)
             else:

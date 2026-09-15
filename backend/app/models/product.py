@@ -82,9 +82,9 @@ class Product(Base, PKMixin, TimestampMixin, SoftDeleteMixin):
 
     @property
     def sale_unit(self) -> str:
-        from app.core.units import sale_unit_of
+        from app.core.units import pack_info
 
-        return sale_unit_of(self)
+        return pack_info(self).sale_unit
 
     @property
     def pack_size(self):

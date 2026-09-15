@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen } from "lucide-react";
 import { api } from "../api";
 import { inr } from "../format";
-import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table } from "../components/ui";
+import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
 import { getCachedCustomers, matchCustomer, refreshCustomers, removeCached, upsertCached } from "../offline";
@@ -19,8 +19,9 @@ export default function Customers() {
   const [form, setForm] = useState<any>(empty);
   const [err, setErr] = useState("");
   const [pay, setPay] = useState<any | null>(null);
-  const [payForm, setPayForm] = useState({ amount: "", mode: "cash", note: "" });
+  const [payForm, setPayForm] = useState({ amount: "", mode: "cash", note: "", branch_id: 0 });
   const [payErr, setPayErr] = useState("");
+  const [branches, setBranches] = useState<any[]>([]);
   const [remind, setRemind] = useState<any | null>(null);
   const [remindBusy, setRemindBusy] = useState(false);
   const [ledger, setLedger] = useState<any | null>(null);
@@ -28,6 +29,7 @@ export default function Customers() {
 
   useEffect(() => {
     getCachedCustomers().then((cached) => { if (cached.length) setRows(cached); }).catch(() => {});
+    api.branches().then((b) => setBranches(b || [])).catch(() => setBranches([]));
   }, []);
 
   useEffect(() => {
@@ -142,7 +144,7 @@ export default function Customers() {
                   <>
                     <button className="icon-btn" style={{ width: 30, height: 30 }} title="Collect khata" onClick={() => {
                       setPayErr(""); setPayConfirm(false); setPay(r);
-                      setPayForm({ amount: "", mode: "cash", note: "" });
+                      setPayForm({ amount: "", mode: "cash", note: "", branch_id: branches[0]?.id || 0 });
                     }}><Wallet size={14} /></button>
                     <button className="icon-btn" style={{ width: 30, height: 30 }} title="WhatsApp reminder" onClick={async () => {
                       try {
@@ -205,9 +207,10 @@ export default function Customers() {
                 setPayErr(`Amount cannot exceed outstanding ${inr(pay.outstanding_balance)}.`);
                 return;
               }
+              if (!payForm.branch_id) { setPayErr("Select the shop that collected this payment."); return; }
               if (!payConfirm) { setPayConfirm(true); return; }
               try {
-                await api.customerPayment(pay.id, { amount, mode: payForm.mode, note: payForm.note || null });
+                await api.customerPayment(pay.id, { amount, mode: payForm.mode, note: payForm.note || null, branch_id: payForm.branch_id });
                 const nextBal = Math.max(0, Number(pay.outstanding_balance || 0) - amount);
                 const next = { ...pay, outstanding_balance: nextBal };
                 upsertCached("customers", next);
@@ -233,6 +236,11 @@ export default function Customers() {
             <Field label="Mode">
               <PaymentSelect value={payForm.mode} onChange={(mode) => { setPayConfirm(false); setPayForm({ ...payForm, mode }); }} use="khata" bundle={bundle} />
             </Field>
+            {branches.length > 0 && (
+              <Field label="Collected at shop" required>
+                <BranchSelect value={payForm.branch_id} onChange={(id) => { setPayConfirm(false); setPayForm({ ...payForm, branch_id: id }); }} branches={branches} allowAll={false} />
+              </Field>
+            )}
           </div>
           <Field label="Note">
             <input value={payForm.note} onChange={(e) => setPayForm({ ...payForm, note: e.target.value })} placeholder="optional" />

@@ -1,7 +1,7 @@
 """Farmer / customer master."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,7 +16,7 @@ from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.models.customer import Customer, CustomerPayment
 from app.models.enums import InvoiceStatus
 from app.models.sales import Invoice
-from app.models.organization import Organization
+from app.models.organization import Branch, Organization
 from app.schemas.masters import CustomerCreate, CustomerOut, CustomerWrite
 from app.services import accounting, whatsapp
 
@@ -155,6 +155,35 @@ class CustomerPaymentIn(BaseModel):
     note: str | None = None
 
 
+def _default_payment_branch(
+    db: Session, current: CurrentUser, customer_id: int, payload_branch_id: int | None
+) -> int | None:
+    if payload_branch_id is not None:
+        current.assert_branch_access(payload_branch_id)
+        return payload_branch_id
+    if len(current.branch_ids) == 1:
+        return current.branch_ids[0]
+    unpaid_branch = db.scalar(
+        select(Invoice.branch_id)
+        .where(
+            Invoice.customer_id == customer_id,
+            Invoice.organization_id == current.organization_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.grand_total > Invoice.amount_paid,
+        )
+        .order_by(Invoice.invoice_date.asc(), Invoice.id.asc())
+        .limit(1)
+    )
+    if unpaid_branch is not None:
+        return unpaid_branch
+    ids = db.scalars(
+        select(Branch.id).where(Branch.organization_id == current.organization_id).limit(2)
+    ).all()
+    if len(ids) == 1:
+        return ids[0]
+    return None
+
+
 def _allocate_receipt_to_invoices(db: Session, *, customer_id: int, amount: Decimal) -> Decimal:
     """Apply a receipt FIFO to the farmer's unpaid invoices. Returns leftover."""
     remaining = Decimal(amount)
@@ -197,16 +226,16 @@ def record_customer_payment(
             status_code=400,
             detail=f"Amount exceeds outstanding khata of ₹{outstanding}",
         )
-    if payload.branch_id is not None:
-        current.assert_branch_access(payload.branch_id)
+    branch_id = _default_payment_branch(db, current, customer.id, payload.branch_id)
 
     payment = CustomerPayment(
         organization_id=current.organization_id,
-        branch_id=payload.branch_id,
+        branch_id=branch_id,
         customer_id=customer.id,
         amount=amount,
         mode=payload.mode,
         note=payload.note,
+        paid_at=datetime.now(),
     )
     db.add(payment)
     db.flush()
@@ -215,7 +244,7 @@ def record_customer_payment(
     accounting.post_customer_receipt(
         db,
         organization_id=current.organization_id,
-        branch_id=payload.branch_id,
+        branch_id=branch_id,
         entry_date=date.today(),
         payment_id=payment.id,
         amount=amount,
@@ -224,8 +253,8 @@ def record_customer_payment(
     record_audit(
         db, action="create", entity_type="customer_payment", entity_id=payment.id,
         actor_user_id=current.id, organization_id=current.organization_id,
-        branch_id=payload.branch_id,
-        changes={"customer_id": customer.id, "amount": str(amount)},
+        branch_id=branch_id,
+        changes={"customer_id": customer.id, "amount": str(amount), "branch_id": branch_id},
     )
     db.commit()
     return {

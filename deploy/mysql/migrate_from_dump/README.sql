@@ -1,0 +1,73 @@
+-- Migration pack for skac_new from Dump20260912.sql
+--
+-- 1. Review each numbered file (mapping notes are in the header).
+-- 2. Run in this order (from repo root):
+--
+--   mysql -u root -p < deploy/mysql/migrate_from_dump/00_schema.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/01_organization.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/02_branch.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/03_user.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/04_user_branch.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/05_ledger_account.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/06_vendor.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/07_customer.sql
+--   mysql -u root -p skac_new < deploy/mysql/master_villages.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/20_customer_village_fix.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/08_product.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/09_product_unit.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/10_batch.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/11_stock.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/21_stock_on_hand.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/12_expense.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/13_day_close.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/14_grn.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/15_grn_item.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/16_invoice.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/17_invoice_item.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/18_customer_payment.sql
+--   mysql -u root -p skac_new < deploy/mysql/migrate_from_dump/19_vendor_payment.sql
+--
+-- Or:  sh deploy/mysql/migrate_from_dump/run.sh
+--
+-- Row counts written by the generator:
+--   batch: 9039
+--   branch: 2
+--   cashout_source: 760
+--   customer: 20425
+--   customer_payment: 42756
+--   customer_phone_cleared: 1372
+--   customer_phone_dup: 198
+--   customer_with_due: 2635
+--   day_close: 749
+--   expense: 6668
+--   expense_deleted_skipped: 199
+--   grn: 3856
+--   grn_deleted_skipped: 33
+--   grn_item: 8112
+--   invoice: 396531
+--   invoice_item: 1041886
+--   ledger_account: 15
+--   product: 3887
+--   product_gst_nonzero: 10
+--   stock: 3887
+--   user: 5
+--   user_branch: 8
+--   vendor: 128
+--   vendor_payment: 904
+--
+-- Review before go-live:
+--   * Stock dump (11) puts every SKU on branch 1. After review, run
+--     21_stock_on_hand.sql from Stock Master.xlsx (Avalurpet + TVM shop counts; Godown ignored).
+--   * Duplicate phones were nulled.
+--   * Day-close keeps only the last cashout per branch+date.
+--   * Invoice numbers are the old AVL/TVM ids; invoice.id is new.
+--   * Users log in as {username}@skac.local with the old passwords.
+--   * Customer village/district: 07 is already normalized; 20_customer_village_fix.sql
+--     is the reviewable UPDATE for an already-loaded DB and adds hamlet names to Config.
+--     Load master_villages.sql before 20. Unmatched typed villages stay title-cased.
+--   * Product GST: 08 keeps legacy gst_rate (almost all 0) and listed pack prices.
+--     22_product_gst.sql / 23_product_purchase_gst.sql are optional exclusive-price
+--     conversions (not run by default). If they were already applied, revert with
+--     24_revert_product_gst_prices.sql to restore dump listed sale/purchase and
+--     gst_rate. Safe on an already-loaded DB. Does not rewrite historical invoices.
+--
