@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { PackagePlus } from "lucide-react";
+import { PackagePlus, Undo2 } from "lucide-react";
 import { api } from "../api";
 import { matchesQuery, num } from "../format";
 import { Badge, BranchSelect, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
@@ -10,6 +10,10 @@ export default function Stock() {
   const [products, setProducts] = useState<any[]>([]);
   const [branches, setBranches] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
+  const [correct, setCorrect] = useState<any | null>(null);
+  const [correctForm, setCorrectForm] = useState<any>({ quantity: "", reason: "", relocate: false, branch_id: "", product_id: "", batch_no: "" });
+  const [correctErr, setCorrectErr] = useState("");
+  const [correcting, setCorrecting] = useState(false);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
   const [branchId, setBranchId] = useState(0);
@@ -77,7 +81,7 @@ export default function Stock() {
     <div>
       <PageHeader
         title="Stock on Hand"
-        subtitle="Batch & expiry-wise stock across branches"
+        subtitle="Batch & expiry-wise stock. Use Correct to undo a wrong receive (wrong shop or product)."
         actions={
           <div className="row">
             <ExportButtons title="Stock on hand" columns={[
@@ -108,6 +112,19 @@ export default function Stock() {
               return r.expiry_date ? <Badge tone={d! < 0 ? "danger" : d! <= 30 ? "warn" : "neutral"}>{r.expiry_date}</Badge> : "—";
             } },
             { key: "quantity", label: "Qty", num: true, render: (r) => <strong>{num(r.quantity)}</strong> },
+            { key: "actions", label: "", render: (r) => (
+              <button className="btn btn-ghost btn-sm" title="Correct wrong receive" onClick={() => {
+                setCorrectErr("");
+                setCorrect(r);
+                setCorrectForm({
+                  quantity: String(r.quantity), reason: "", relocate: false,
+                  branch_id: r.branch_id, product_id: "", batch_no: r.batch_no,
+                });
+                api.products(undefined, undefined, 80).then(setProducts).catch(() => {});
+              }}>
+                <Undo2 size={14} /> Correct
+              </button>
+            ) },
           ]}
           rows={filtered}
           empty={rows.length ? "No stock matches the filters" : "No stock recorded"}
@@ -137,6 +154,84 @@ export default function Stock() {
             <Field label="Expiry date"><input type="date" value={form.expiry_date} onChange={(e) => setForm({ ...form, expiry_date: e.target.value })} /></Field>
             <Field label="Purchase price"><input type="number" value={form.purchase_price} onChange={(e) => setForm({ ...form, purchase_price: e.target.value })} /></Field>
           </div>
+        </Modal>
+      )}
+
+      {correct && (
+        <Modal title="Correct stock" onClose={() => setCorrect(null)}
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setCorrect(null)} disabled={correcting}>Cancel</button>
+            <button className="btn btn-danger" onClick={async () => {
+              setCorrectErr("");
+              const qty = Number(correctForm.quantity);
+              const msg = V.firstError(
+                V.positive(correctForm.quantity, "Quantity"),
+                qty > Number(correct.quantity) ? `Cannot exceed on-hand ${correct.quantity}.` : null,
+                V.minLen(correctForm.reason, "Reason", 3),
+                correctForm.relocate && !correctForm.branch_id ? "Select the correct branch." : null,
+                correctForm.relocate && !correctForm.product_id ? "Select the correct product." : null,
+                correctForm.relocate ? V.required(correctForm.batch_no, "Batch number") : null,
+              );
+              if (msg) { setCorrectErr(msg); return; }
+              setCorrecting(true);
+              try {
+                const body: any = {
+                  branch_id: correct.branch_id, product_id: correct.product_id,
+                  batch_id: correct.batch_id, quantity: qty, reason: String(correctForm.reason).trim(),
+                };
+                if (correctForm.relocate) {
+                  body.correct_branch_id = Number(correctForm.branch_id);
+                  body.correct_product_id = Number(correctForm.product_id);
+                  body.correct_batch_no = correctForm.batch_no;
+                }
+                await api.adjustStock(body);
+                setCorrect(null); load();
+              } catch (e: any) { setCorrectErr(e.message); }
+              finally { setCorrecting(false); }
+            }} disabled={correcting}>{correcting ? "Saving…" : correctForm.relocate ? "Move qty" : "Remove qty"}</button>
+          </>}>
+          {correctErr && <div className="error">{correctErr}</div>}
+          <p className="muted" style={{ marginTop: 0 }}>
+            {correct.product} · batch {correct.batch_no} · {branches.find((b) => b.id === correct.branch_id)?.name || "branch"} · on hand <strong>{num(correct.quantity)}</strong>
+          </p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            Stock loaded here with Receive Stock can be corrected. Qty that came from a GRN must be reversed with a purchase return on Purchasing.
+          </p>
+          <div className="grid grid-2">
+            <Field label="Qty to reverse" required>
+              <input type="number" value={correctForm.quantity} onChange={(e) => setCorrectForm({ ...correctForm, quantity: e.target.value })} />
+            </Field>
+            <Field label="Reason" required>
+              <input value={correctForm.reason} onChange={(e) => setCorrectForm({ ...correctForm, reason: e.target.value })} placeholder="Wrong branch / wrong product" />
+            </Field>
+          </div>
+          <label className="row" style={{ gap: 8, cursor: "pointer", margin: "8px 0 12px" }}>
+            <input type="checkbox" style={{ width: "auto" }} checked={correctForm.relocate}
+              onChange={(e) => setCorrectForm({ ...correctForm, relocate: e.target.checked })} />
+            Load this qty onto the correct product or branch
+          </label>
+          {correctForm.relocate && (
+            <div className="grid grid-2">
+              <Field label="Correct branch" required>
+                <select value={correctForm.branch_id} onChange={(e) => setCorrectForm({ ...correctForm, branch_id: e.target.value })}>
+                  {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              </Field>
+              <Field label="Correct product" required>
+                <SearchSelect
+                  value={correctForm.product_id}
+                  options={products}
+                  placeholder="Type product name / SKU…"
+                  onChange={(id) => setCorrectForm({ ...correctForm, product_id: id })}
+                  onQuery={searchProducts}
+                  getLabel={(p) => `${p.name}${p.sku ? ` · ${p.sku}` : ""}`}
+                />
+              </Field>
+              <Field label="Batch no" required>
+                <input value={correctForm.batch_no} onChange={(e) => setCorrectForm({ ...correctForm, batch_no: e.target.value })} />
+              </Field>
+            </div>
+          )}
         </Modal>
       )}
     </div>

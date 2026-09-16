@@ -37,6 +37,7 @@ TRUNCATE TABLE invoice;
 TRUNCATE TABLE grn;
 TRUNCATE TABLE purchase_order;
 TRUNCATE TABLE vendor_payment;
+TRUNCATE TABLE customer_payment_allocation;
 TRUNCATE TABLE customer_payment;
 TRUNCATE TABLE expense;
 TRUNCATE TABLE journal_entry;

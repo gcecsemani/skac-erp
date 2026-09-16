@@ -187,6 +187,7 @@ export const api = {
   // inventory
   stock: (branchId?: number) => get<any[]>(`/inventory/stock${branchId ? `?branch_id=${branchId}` : ""}`),
   receiveStock: (r: any) => post("/inventory/receive", r),
+  adjustStock: (r: any) => post("/inventory/adjust", r),
   forecast: (onlyNeeding = false) => get<any[]>(`/inventory/forecast?only_needing_purchase=${onlyNeeding}`),
 
   // sales
@@ -233,9 +234,11 @@ export const api = {
   purchaseReturns: (search?: string) =>
     get<any[]>(`/purchasing/returns${search ? `?search=${encodeURIComponent(search)}` : ""}`),
   createPurchaseReturn: (p: any) => post<any>("/purchasing/returns", p),
+  reverseGRN: (id: number, p: any) => post<any>(`/purchasing/grn/${id}/reverse`, p),
   vendorPayment: (p: any) => post("/purchasing/payments", p),
   vendorPayments: (vendorId?: number) =>
     get<any[]>(`/purchasing/payments${vendorId ? `?vendor_id=${vendorId}` : ""}`),
+  reverseVendorPayment: (id: number, p: any) => post<any>(`/purchasing/payments/${id}/reverse`, p),
 
   expenses: (opts?: { branchId?: number; start?: string; end?: string; category?: string }) => {
     const p = new URLSearchParams();
@@ -322,6 +325,8 @@ export const api = {
     return get<any>(`/reports/table?${p}`, opts?.signal ? { signal: opts.signal } : undefined);
   },
   customerPayment: (id: number, p: any) => post<any>(`/customers/${id}/payments`, p),
+  reverseCustomerPayment: (customerId: number, paymentId: number, p: any) =>
+    post<any>(`/customers/${customerId}/payments/${paymentId}/reverse`, p),
   customerLedger: (id: number) => get<any>(`/customers/${id}/ledger`),
   remindCustomer: (id: number, send = true) =>
     post<any>(`/customers/${id}/remind?send=${send}`),

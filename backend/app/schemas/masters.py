@@ -169,3 +169,19 @@ class StockReceiptIn(BaseModel):
     mfg_date: date | None = None
     expiry_date: date | None = None
     purchase_price: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class StockAdjustIn(BaseModel):
+    """Take qty off an incorrect receive; optionally load it onto the right product/branch."""
+
+    branch_id: int
+    product_id: int
+    batch_id: int
+    quantity: Decimal = Field(gt=0)
+    reason: str = Field(min_length=3, max_length=255)
+    correct_branch_id: int | None = None
+    correct_product_id: int | None = None
+    correct_batch_no: str | None = Field(default=None, max_length=80)
+    correct_mfg_date: date | None = None
+    correct_expiry_date: date | None = None
+    correct_purchase_price: Decimal | None = Field(default=None, ge=0)

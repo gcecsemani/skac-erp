@@ -40,6 +40,10 @@ export default function Purchasing() {
   const [returnQty, setReturnQty] = useState<Record<number, number>>({});
   const [pickerGrns, setPickerGrns] = useState<any[]>([]);
   const [viewReturn, setViewReturn] = useState<any | null>(null);
+  const [revPay, setRevPay] = useState<any | null>(null);
+  const [revReason, setRevReason] = useState("");
+  const [revErr, setRevErr] = useState("");
+  const [revBusy, setRevBusy] = useState(false);
 
   const loadAll = async (vq?: string, oq?: string, gq?: string, rq?: string) => {
     const [v, o, g, r] = await Promise.all([
@@ -307,9 +311,16 @@ export default function Purchasing() {
               { key: "vendor_invoice_no", label: "Vendor Inv#" },
               { key: "total_value", label: "Value", num: true, render: (r) => inr(r.total_value) },
               { key: "actions", label: "", render: (r) => (
-                <button className="btn btn-ghost btn-sm" title="Return to vendor" onClick={() => openReturn(r)}>
-                  <Undo2 size={14} /> Return
-                </button>
+                <div className="row" style={{ gap: 4, justifyContent: "flex-end" }}>
+                  <button className="btn btn-ghost btn-sm" title="Return selected qty" onClick={() => openReturn(r)}>
+                    <Undo2 size={14} /> Return
+                  </button>
+                  <button className="btn btn-ghost btn-sm" title="Reverse leftover stock on this GRN" onClick={() => {
+                    setRevErr(""); setRevReason("Incorrect GRN"); setRevPay({ kind: "grn", ...r });
+                  }}>
+                    Reverse leftover
+                  </button>
+                </div>
               ) },
             ]}
             rows={grns} empty="No goods receipts"
@@ -500,12 +511,17 @@ export default function Purchasing() {
           <Table
             columns={[
               { key: "date", label: "Date" },
-              { key: "kind", label: "Type", render: (r) => <Badge tone={r.kind === "payment" ? "success" : r.kind === "return" ? "warn" : "info"}>{r.kind === "payment" ? "Payment" : r.kind === "return" ? "Return" : "GRN"}</Badge> },
+              { key: "kind", label: "Type", render: (r) => <Badge tone={r.kind === "payment" ? "success" : r.kind === "return" ? "warn" : r.kind === "payment_reversal" ? "danger" : "info"}>{r.kind === "payment" ? "Payment" : r.kind === "return" ? "Return" : r.kind === "payment_reversal" ? "Payment reversed" : "GRN"}</Badge> },
               { key: "ref", label: "Ref" },
               { key: "note", label: "Note", render: (r) => r.note || "—" },
               { key: "debit", label: "Purchase", num: true, render: (r) => r.debit ? inr(r.debit) : "—" },
               { key: "credit", label: "Paid / returned", num: true, render: (r) => r.credit ? inr(r.credit) : "—" },
               { key: "balance", label: "Balance", num: true, render: (r) => inr(r.balance) },
+              { key: "actions", label: "", render: (r) => r.kind === "payment" && !r.reversed ? (
+                <button className="btn btn-ghost btn-sm" title="Reverse this payment" onClick={() => {
+                  setRevErr(""); setRevReason(""); setRevPay({ kind: "vendor_payment", id: r.id, amount: r.credit, vendor_id: ledger.id });
+                }}><Undo2 size={14} /> Reverse</button>
+              ) : null },
             ]}
             rows={ledger.entries || []}
             empty="No purchases or payments yet"
@@ -542,6 +558,45 @@ export default function Purchasing() {
             rows={viewReturn.items || []}
             empty="No lines"
           />
+        </Modal>
+      )}
+
+      {revPay && (
+        <Modal
+          title={revPay.kind === "grn" ? `Reverse leftover on ${revPay.grn_no}` : "Reverse vendor payment"}
+          onClose={() => setRevPay(null)}
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setRevPay(null)} disabled={revBusy}>Cancel</button>
+            <button className="btn btn-danger" disabled={revBusy} onClick={async () => {
+              setRevErr("");
+              const msg = V.minLen(revReason, "Reason", 3);
+              if (msg) { setRevErr(msg); return; }
+              setRevBusy(true);
+              try {
+                if (revPay.kind === "grn") {
+                  const res = await api.reverseGRN(revPay.id, { reason: revReason.trim() });
+                  if (res.warning) alert(res.warning);
+                } else {
+                  await api.reverseVendorPayment(revPay.id, { reason: revReason.trim() });
+                }
+                const vendorId = ledger?.id;
+                setRevPay(null);
+                await loadAll();
+                if (vendorId) setLedger(await api.vendorLedger(vendorId));
+              } catch (e: any) { setRevErr(e.message); }
+              finally { setRevBusy(false); }
+            }}>{revBusy ? "Saving…" : revPay.kind === "grn" ? "Issue debit note" : `Reverse ${inr(revPay.amount || 0)}`}</button>
+          </>}>
+          {revErr && <div className="error">{revErr}</div>}
+          <p className="muted" style={{ marginTop: 0 }}>
+            {revPay.kind === "grn"
+              ? "This issues a debit note for every line still on hand. Qty already sold or transferred is left as-is. Then enter a new GRN if the goods belong on another vendor, product, or shop."
+              : "This puts the amount back on the vendor's payable and reverses the cash/bank entry. The original payment stays in the ledger as reversed. Then record the payment on the correct vendor."}
+          </p>
+          <Field label="Reason" required>
+            <input value={revReason} onChange={(e) => setRevReason(e.target.value)}
+              placeholder={revPay.kind === "grn" ? "Wrong vendor / wrong product / wrong branch" : "Paid the wrong vendor"} />
+          </Field>
         </Modal>
       )}
     </div>

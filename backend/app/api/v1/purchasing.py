@@ -1,7 +1,7 @@
 """Purchase cycle: vendors, purchase orders, GRN, purchase returns, vendor payments."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -127,6 +127,10 @@ class PurchaseReturnIn(BaseModel):
     grn_id: int
     reason: str = Field(min_length=3, max_length=255)
     items: list[PurchaseReturnItemIn] = Field(min_length=1)
+
+
+class ReverseIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=255)
 
 
 def _gstin_state(gstin: str | None, fallback: str | None = None) -> str | None:
@@ -267,14 +271,27 @@ def vendor_ledger(
             "note": g.vendor_invoice_no,
         })
     for p in payments:
+        paid_date = p.paid_at.date().isoformat() if p.paid_at else None
         entries.append({
             "kind": "payment",
-            "date": (p.paid_at.date().isoformat() if p.paid_at else None),
+            "id": p.id,
+            "date": paid_date,
             "ref": f"PAY-{p.id}",
             "debit": 0,
             "credit": float(p.amount),
             "note": p.note or p.mode,
+            "reversed": p.reversed_at is not None,
         })
+        if p.reversed_at is not None:
+            entries.append({
+                "kind": "payment_reversal",
+                "date": p.reversed_at.date().isoformat(),
+                "ref": f"REV-{p.id}",
+                "debit": float(p.amount),
+                "credit": 0,
+                "note": p.reversal_reason or "Reversed",
+                "reversed": True,
+            })
     returns = db.scalars(
         select(PurchaseReturn).where(
             PurchaseReturn.organization_id == current.organization_id,
@@ -292,7 +309,7 @@ def vendor_ledger(
         })
     entries.sort(key=lambda e: (
         e["date"] or "",
-        {"grn": 0, "return": 1, "payment": 2}.get(e["kind"], 9),
+        {"grn": 0, "return": 1, "payment": 2, "payment_reversal": 3}.get(e["kind"], 9),
         e["ref"] or "",
     ))
     running = 0.0
@@ -313,6 +330,8 @@ def vendor_ledger(
                 "amount": float(p.amount),
                 "mode": p.mode,
                 "note": p.note,
+                "reversed_at": p.reversed_at.isoformat() if p.reversed_at else None,
+                "reversal_reason": p.reversal_reason,
             }
             for p in reversed(list(payments))
         ],
@@ -783,6 +802,49 @@ def create_purchase_return(
     return _serialize_purchase_return(db, note)
 
 
+@router.post("/grn/{grn_id}/reverse", status_code=201)
+def reverse_grn(
+    grn_id: int,
+    payload: ReverseIn,
+    current: CurrentUser = Depends(require_permission(rbac.P_PURCHASE_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Issue a debit note for every returnable line still on hand."""
+    grn = db.get(GRN, grn_id)
+    if grn is None or grn.organization_id != current.organization_id:
+        raise HTTPException(status_code=404, detail="GRN not found")
+    current.assert_branch_access(grn.branch_id)
+    detail = _serialize_grn(db, grn)
+    items: list[PurchaseReturnItemIn] = []
+    skipped: list[str] = []
+    for it in detail["items"]:
+        qty = Decimal(str(it["returnable"]))
+        if qty > 0:
+            items.append(PurchaseReturnItemIn(grn_item_id=it["id"], quantity=qty))
+        elif Decimal(str(it["quantity"])) > Decimal(str(it.get("returned_quantity") or 0)):
+            skipped.append(str(it.get("product_name") or it["product_id"]))
+    if not items:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot reverse this GRN. Remaining stock of these batches has already been "
+                "sold or transferred. Raise a sales return for sold qty first, then reverse "
+                "whatever is still on hand."
+            ),
+        )
+    result = create_purchase_return(
+        PurchaseReturnIn(grn_id=grn.id, reason=payload.reason.strip(), items=items),
+        current,
+        db,
+    )
+    if skipped:
+        result["warning"] = (
+            "Debit note issued for stock still on hand. Already sold or transferred "
+            f"and not reversed: {', '.join(skipped)}."
+        )
+    return result
+
+
 # --- Vendor payments ---
 @router.post("/payments", status_code=201)
 def create_payment(
@@ -811,6 +873,49 @@ def create_payment(
     return {"id": payment.id, "vendor_outstanding": float(vendor.outstanding_balance)}
 
 
+@router.post("/payments/{payment_id}/reverse")
+def reverse_vendor_payment(
+    payment_id: int,
+    payload: ReverseIn,
+    current: CurrentUser = Depends(require_permission(rbac.P_PURCHASE_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Undo a vendor payment posted to the wrong supplier. Does not delete the row."""
+    payment = db.get(VendorPayment, payment_id)
+    if payment is None or payment.organization_id != current.organization_id:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.reversed_at is not None:
+        raise HTTPException(status_code=409, detail="This payment is already reversed")
+    if payment.branch_id is not None:
+        current.assert_branch_access(payment.branch_id)
+    vendor = db.get(Vendor, payment.vendor_id)
+    if vendor is None or vendor.organization_id != current.organization_id:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    amount = Decimal(payment.amount)
+    reason = payload.reason.strip()
+    vendor.outstanding_balance = vendor.outstanding_balance + amount
+    payment.reversed_at = datetime.now()
+    payment.reversed_by_user_id = current.id
+    payment.reversal_reason = reason
+    accounting.post_vendor_payment_reversal(
+        db, organization_id=current.organization_id, branch_id=payment.branch_id,
+        entry_date=date.today(), payment_id=payment.id, amount=amount, mode=payment.mode,
+    )
+    record_audit(
+        db, action="update", entity_type="vendor_payment", entity_id=payment.id,
+        actor_user_id=current.id, organization_id=current.organization_id,
+        branch_id=payment.branch_id,
+        changes={"reversed": True, "reason": reason, "amount": str(amount)},
+    )
+    db.commit()
+    return {
+        "id": payment.id,
+        "reversed": True,
+        "vendor_id": vendor.id,
+        "vendor_outstanding": float(vendor.outstanding_balance),
+    }
+
+
 @router.get("/payments")
 def list_payments(
     vendor_id: int | None = None,
@@ -833,5 +938,7 @@ def list_payments(
             "amount": float(p.amount),
             "mode": p.mode,
             "note": p.note,
+            "reversed_at": p.reversed_at.isoformat() if p.reversed_at else None,
+            "reversal_reason": p.reversal_reason,
         })
     return out

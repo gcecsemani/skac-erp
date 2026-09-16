@@ -2,7 +2,7 @@
 from app.models.accounting import JournalEntry, JournalLine, LedgerAccount
 from app.models.config import ConfigItem
 from app.models.audit import AuditLog
-from app.models.customer import Customer, CustomerPayment
+from app.models.customer import Customer, CustomerPayment, CustomerPaymentAllocation
 from app.models.day_close import DayClose
 from app.models.expense import Expense
 from app.models.field_visit import FieldVisit, FieldVisitPhoto
@@ -41,6 +41,7 @@ __all__ = [
     "AuditLog",
     "Customer",
     "CustomerPayment",
+    "CustomerPaymentAllocation",
     "DayClose",
     "Expense",
     "FieldVisit",

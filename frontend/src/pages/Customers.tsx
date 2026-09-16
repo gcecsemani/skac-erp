@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen } from "lucide-react";
+import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen, Undo2 } from "lucide-react";
 import { api } from "../api";
 import { inr } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
@@ -26,6 +26,10 @@ export default function Customers() {
   const [remindBusy, setRemindBusy] = useState(false);
   const [ledger, setLedger] = useState<any | null>(null);
   const [payConfirm, setPayConfirm] = useState(false);
+  const [revPay, setRevPay] = useState<any | null>(null);
+  const [revReason, setRevReason] = useState("");
+  const [revErr, setRevErr] = useState("");
+  const [revBusy, setRevBusy] = useState(false);
 
   useEffect(() => {
     getCachedCustomers().then((cached) => { if (cached.length) setRows(cached); }).catch(() => {});
@@ -297,8 +301,17 @@ export default function Customers() {
             columns={[
               { key: "paid_at", label: "Date", render: (r) => String(r.paid_at || "").replace("T", " ").slice(0, 16) },
               { key: "mode", label: "Mode" },
-              { key: "note", label: "Note", render: (r) => r.note || "—" },
-              { key: "amount", label: "Amount", num: true, render: (r) => inr(r.amount) },
+              { key: "note", label: "Note", render: (r) => r.reversed_at ? (r.reversal_reason || "Reversed") : (r.note || "—") },
+              { key: "amount", label: "Amount", num: true, render: (r) => (
+                <span style={r.reversed_at ? { textDecoration: "line-through", opacity: 0.55 } : undefined}>{inr(r.amount)}</span>
+              ) },
+              { key: "status", label: "", render: (r) => r.reversed_at
+                ? <Badge tone="danger">Reversed</Badge>
+                : (
+                  <button className="btn btn-ghost btn-sm" title="Reverse this collection" onClick={() => {
+                    setRevErr(""); setRevReason(""); setRevPay(r);
+                  }}><Undo2 size={14} /> Reverse</button>
+                ) },
             ]}
             rows={ledger.payments || []}
             empty="No khata collections recorded yet"
@@ -316,6 +329,36 @@ export default function Customers() {
             empty="No invoices for this farmer"
             pageSize={25}
           />
+        </Modal>
+      )}
+
+      {revPay && ledger && (
+        <Modal title="Reverse khata collection" onClose={() => setRevPay(null)}
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setRevPay(null)} disabled={revBusy}>Cancel</button>
+            <button className="btn btn-danger" disabled={revBusy} onClick={async () => {
+              setRevErr("");
+              const msg = V.minLen(revReason, "Reason", 3);
+              if (msg) { setRevErr(msg); return; }
+              setRevBusy(true);
+              try {
+                const res = await api.reverseCustomerPayment(ledger.id, revPay.id, { reason: revReason.trim() });
+                setRevPay(null);
+                const next = await api.customerLedger(ledger.id);
+                setLedger(next);
+                setRows((cur) => (cur || []).map((x) => x.id === ledger.id ? { ...x, outstanding_balance: res.outstanding_balance } : x));
+                upsertCached("customers", { id: ledger.id, outstanding_balance: res.outstanding_balance });
+              } catch (e: any) { setRevErr(e.message); }
+              finally { setRevBusy(false); }
+            }}>{revBusy ? "Saving…" : `Reverse ${inr(revPay.amount)}`}</button>
+          </>}>
+          {revErr && <div className="error">{revErr}</div>}
+          <p className="muted" style={{ marginTop: 0 }}>
+            This puts ₹{Number(revPay.amount).toFixed(2)} back on {ledger.name}'s khata and reverses the cash/bank entry. The original collection stays in the ledger as reversed. Then collect the amount on the correct farmer.
+          </p>
+          <Field label="Reason" required>
+            <input value={revReason} onChange={(e) => setRevReason(e.target.value)} placeholder="Collected against the wrong farmer" />
+          </Field>
         </Modal>
       )}
     </div>

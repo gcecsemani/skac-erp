@@ -150,6 +150,7 @@ def issue_from_batch(
     movement_type: MovementType,
     ref_type: str | None = None,
     ref_id: int | None = None,
+    note: str | None = None,
 ) -> None:
     """Issue a specific batch (purchase returns must go back on the GRN batch)."""
     stock = db.scalar(
@@ -178,6 +179,7 @@ def issue_from_batch(
         movement_type=movement_type,
         ref_type=ref_type,
         ref_id=ref_id,
+        note=note,
     )
 
 
@@ -192,6 +194,7 @@ def apply_issue(
     ref_type: str | None = None,
     ref_id: int | None = None,
     occurred_at: datetime | None = None,
+    note: str | None = None,
 ) -> None:
     """Decrement stock and write movement ledger rows for each allocation."""
     occurred_at = occurred_at or datetime.utcnow()
@@ -214,6 +217,7 @@ def apply_issue(
                 ref_type=ref_type,
                 ref_id=ref_id,
                 occurred_at=occurred_at,
+                note=note,
             )
         )
 
@@ -230,6 +234,7 @@ def receive_stock(
     ref_type: str | None = None,
     ref_id: int | None = None,
     occurred_at: datetime | None = None,
+    note: str | None = None,
 ) -> Stock:
     """Increment (or create) stock for a batch and write an inflow movement."""
     occurred_at = occurred_at or datetime.utcnow()
@@ -258,6 +263,7 @@ def receive_stock(
             ref_type=ref_type,
             ref_id=ref_id,
             occurred_at=occurred_at,
+            note=note,
         )
     )
     return stock

@@ -135,6 +135,24 @@ def post_vendor_payment(db, *, organization_id, branch_id, entry_date, payment_i
                       (cash_acc, Decimal("0"), Decimal(amount))])    # Cr Cash/Bank
 
 
+def post_customer_receipt_reversal(db, *, organization_id, branch_id, entry_date, payment_id, amount, mode) -> None:
+    cash_acc = "1010" if mode in ("bank", "upi", "card") else "1000"
+    post_entry(db, organization_id=organization_id, branch_id=branch_id,
+               entry_date=entry_date, narration="Reverse customer receipt",
+               ref_type="customer_payment_reversal", ref_id=payment_id,
+               lines=[("1200", Decimal(amount), Decimal("0")),       # Dr Debtors
+                      (cash_acc, Decimal("0"), Decimal(amount))])    # Cr Cash/Bank
+
+
+def post_vendor_payment_reversal(db, *, organization_id, branch_id, entry_date, payment_id, amount, mode) -> None:
+    cash_acc = "1010" if mode in ("bank", "upi", "card") else "1000"
+    post_entry(db, organization_id=organization_id, branch_id=branch_id,
+               entry_date=entry_date, narration="Reverse vendor payment",
+               ref_type="vendor_payment_reversal", ref_id=payment_id,
+               lines=[(cash_acc, Decimal(amount), Decimal("0")),     # Dr Cash/Bank
+                      ("2000", Decimal("0"), Decimal(amount))])      # Cr Creditors
+
+
 def expense_account_for(db: Session, organization_id: int, category: str) -> str:
     from app.models.config import KIND_EXPENSE, ConfigItem
     row = db.scalar(select(ConfigItem).where(

@@ -58,3 +58,20 @@ class CustomerPayment(Base, PKMixin, TimestampMixin):
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     mode: Mapped[str] = mapped_column(String(20), default="cash")
     note: Mapped[str | None] = mapped_column(String(255))
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reversed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id"))
+    reversal_reason: Mapped[str | None] = mapped_column(String(255))
+
+
+class CustomerPaymentAllocation(Base, PKMixin, TimestampMixin):
+    """How a khata receipt was applied to invoices (needed to reverse exactly)."""
+
+    __tablename__ = "customer_payment_allocation"
+
+    payment_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_payment.id"), nullable=False, index=True
+    )
+    invoice_id: Mapped[int] = mapped_column(
+        ForeignKey("invoice.id"), nullable=False, index=True
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)

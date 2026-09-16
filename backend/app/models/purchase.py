@@ -101,6 +101,9 @@ class VendorPayment(Base, PKMixin, TimestampMixin):
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     mode: Mapped[str] = mapped_column(String(20), default="cash")
     note: Mapped[str | None] = mapped_column(String(255))
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reversed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id"))
+    reversal_reason: Mapped[str | None] = mapped_column(String(255))
 
 
 class PurchaseReturn(Base, PKMixin, TimestampMixin):

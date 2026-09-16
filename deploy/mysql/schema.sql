@@ -216,6 +216,9 @@ CREATE TABLE IF NOT EXISTS customer_payment (
 	amount NUMERIC(14, 2) NOT NULL, 
 	mode VARCHAR(20) NOT NULL, 
 	note VARCHAR(255), 
+	reversed_at DATETIME, 
+	reversed_by_user_id BIGINT, 
+	reversal_reason VARCHAR(255), 
 	id BIGINT NOT NULL AUTO_INCREMENT, 
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
@@ -223,6 +226,18 @@ CREATE TABLE IF NOT EXISTS customer_payment (
 	FOREIGN KEY(organization_id) REFERENCES organization (id), 
 	FOREIGN KEY(branch_id) REFERENCES branch (id), 
 	FOREIGN KEY(customer_id) REFERENCES customer (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS customer_payment_allocation (
+	payment_id BIGINT NOT NULL,
+	invoice_id BIGINT NOT NULL,
+	amount NUMERIC(14, 2) NOT NULL,
+	id BIGINT NOT NULL AUTO_INCREMENT,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	FOREIGN KEY(payment_id) REFERENCES customer_payment (id),
+	FOREIGN KEY(invoice_id) REFERENCES invoice (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS expense (
@@ -391,6 +406,9 @@ CREATE TABLE IF NOT EXISTS vendor_payment (
 	amount NUMERIC(14, 2) NOT NULL, 
 	mode VARCHAR(20) NOT NULL, 
 	note VARCHAR(255), 
+	reversed_at DATETIME, 
+	reversed_by_user_id BIGINT, 
+	reversal_reason VARCHAR(255), 
 	id BIGINT NOT NULL AUTO_INCREMENT, 
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 

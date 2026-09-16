@@ -13,7 +13,7 @@ from app.core import rbac
 from app.core.audit import record_audit
 from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
-from app.models.customer import Customer, CustomerPayment
+from app.models.customer import Customer, CustomerPayment, CustomerPaymentAllocation
 from app.models.enums import InvoiceStatus
 from app.models.sales import Invoice
 from app.models.organization import Branch, Organization
@@ -155,6 +155,10 @@ class CustomerPaymentIn(BaseModel):
     note: str | None = None
 
 
+class ReversePaymentIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=255)
+
+
 def _default_payment_branch(
     db: Session, current: CurrentUser, customer_id: int, payload_branch_id: int | None
 ) -> int | None:
@@ -184,7 +188,9 @@ def _default_payment_branch(
     return None
 
 
-def _allocate_receipt_to_invoices(db: Session, *, customer_id: int, amount: Decimal) -> Decimal:
+def _allocate_receipt_to_invoices(
+    db: Session, *, customer_id: int, amount: Decimal, payment_id: int
+) -> Decimal:
     """Apply a receipt FIFO to the farmer's unpaid invoices. Returns leftover."""
     remaining = Decimal(amount)
     invoices = db.scalars(
@@ -201,11 +207,48 @@ def _allocate_receipt_to_invoices(db: Session, *, customer_id: int, amount: Deci
         if due <= 0:
             continue
         apply = due if remaining >= due else remaining
+        apply = apply.quantize(Decimal("0.01"))
         inv.amount_paid = (inv.amount_paid + apply).quantize(Decimal("0.01"))
+        db.add(CustomerPaymentAllocation(
+            payment_id=payment_id, invoice_id=inv.id, amount=apply,
+        ))
         remaining = (remaining - apply).quantize(Decimal("0.01"))
         if remaining <= 0:
             break
     return remaining
+
+
+def _unallocate_receipt(db: Session, *, payment: CustomerPayment) -> None:
+    """Remove this receipt from the invoices it paid."""
+    allocs = db.scalars(
+        select(CustomerPaymentAllocation).where(
+            CustomerPaymentAllocation.payment_id == payment.id
+        )
+    ).all()
+    if allocs:
+        for row in allocs:
+            inv = db.get(Invoice, row.invoice_id)
+            if inv is not None:
+                inv.amount_paid = (inv.amount_paid - row.amount).quantize(Decimal("0.01"))
+                if inv.amount_paid < 0:
+                    inv.amount_paid = Decimal("0")
+        return
+    remaining = Decimal(payment.amount)
+    invoices = db.scalars(
+        select(Invoice)
+        .where(
+            Invoice.customer_id == payment.customer_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.amount_paid > 0,
+        )
+        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+    ).all()
+    for inv in invoices:
+        take = inv.amount_paid if remaining >= inv.amount_paid else remaining
+        inv.amount_paid = (inv.amount_paid - take).quantize(Decimal("0.01"))
+        remaining = (remaining - take).quantize(Decimal("0.01"))
+        if remaining <= 0:
+            break
 
 
 @router.post("/{customer_id}/payments", status_code=201)
@@ -239,7 +282,9 @@ def record_customer_payment(
     )
     db.add(payment)
     db.flush()
-    _allocate_receipt_to_invoices(db, customer_id=customer.id, amount=amount)
+    _allocate_receipt_to_invoices(
+        db, customer_id=customer.id, amount=amount, payment_id=payment.id,
+    )
     customer.outstanding_balance = (outstanding - amount).quantize(Decimal("0.01"))
     accounting.post_customer_receipt(
         db,
@@ -265,6 +310,64 @@ def record_customer_payment(
     }
 
 
+@router.post("/{customer_id}/payments/{payment_id}/reverse")
+def reverse_customer_payment(
+    customer_id: int,
+    payment_id: int,
+    payload: ReversePaymentIn,
+    current: CurrentUser = Depends(require_permission(rbac.P_SALE_CANCEL)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Undo a khata collection posted to the wrong farmer. Does not delete the row."""
+    customer = _get_owned_customer(db, customer_id, current.organization_id)
+    payment = db.get(CustomerPayment, payment_id)
+    if (
+        payment is None
+        or payment.organization_id != current.organization_id
+        or payment.customer_id != customer.id
+    ):
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.reversed_at is not None:
+        raise HTTPException(status_code=409, detail="This payment is already reversed")
+    if payment.branch_id is not None:
+        current.assert_branch_access(payment.branch_id)
+    elif not current.sees_all_branches:
+        raise HTTPException(status_code=403, detail="No access to reverse this payment")
+
+    reason = payload.reason.strip()
+    _unallocate_receipt(db, payment=payment)
+    amount = Decimal(payment.amount).quantize(Decimal("0.01"))
+    customer.outstanding_balance = (Decimal(customer.outstanding_balance or 0) + amount).quantize(
+        Decimal("0.01")
+    )
+    payment.reversed_at = datetime.now()
+    payment.reversed_by_user_id = current.id
+    payment.reversal_reason = reason
+    accounting.post_customer_receipt_reversal(
+        db,
+        organization_id=current.organization_id,
+        branch_id=payment.branch_id,
+        entry_date=date.today(),
+        payment_id=payment.id,
+        amount=amount,
+        mode=payment.mode,
+    )
+    record_audit(
+        db, action="update", entity_type="customer_payment", entity_id=payment.id,
+        actor_user_id=current.id, organization_id=current.organization_id,
+        branch_id=payment.branch_id,
+        changes={"reversed": True, "reason": reason, "amount": str(amount)},
+    )
+    db.commit()
+    return {
+        "id": payment.id,
+        "reversed": True,
+        "customer_id": customer.id,
+        "amount": float(amount),
+        "outstanding_balance": float(customer.outstanding_balance),
+    }
+
+
 @router.get("/{customer_id}/ledger")
 def customer_ledger(
     customer_id: int,
@@ -273,11 +376,8 @@ def customer_ledger(
 ) -> dict:
     """Khata collections and invoice history for a farmer."""
     customer = _get_owned_customer(db, customer_id, current.organization_id)
-    payments = db.execute(
-        select(
-            CustomerPayment.id, CustomerPayment.paid_at, CustomerPayment.amount,
-            CustomerPayment.mode, CustomerPayment.note,
-        )
+    payments = db.scalars(
+        select(CustomerPayment)
         .where(CustomerPayment.customer_id == customer.id)
         .order_by(CustomerPayment.paid_at.desc(), CustomerPayment.id.desc())
         .limit(200)
@@ -300,13 +400,15 @@ def customer_ledger(
         "outstanding_balance": float(customer.outstanding_balance or 0),
         "payments": [
             {
-                "id": pid,
-                "paid_at": paid_at.isoformat() if paid_at else None,
-                "amount": float(amount),
-                "mode": mode,
-                "note": note,
+                "id": p.id,
+                "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+                "amount": float(p.amount),
+                "mode": p.mode,
+                "note": p.note,
+                "reversed_at": p.reversed_at.isoformat() if p.reversed_at else None,
+                "reversal_reason": p.reversal_reason,
             }
-            for pid, paid_at, amount, mode, note in payments
+            for p in payments
         ],
         "invoices": [
             {

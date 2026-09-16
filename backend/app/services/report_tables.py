@@ -763,6 +763,7 @@ def _payment_collection(db, org_id, scope, start, end) -> dict:
         CustomerPayment.organization_id == org_id,
         CustomerPayment.paid_at >= pay_start,
         CustomerPayment.paid_at < pay_end,
+        CustomerPayment.reversed_at.is_(None),
     ).order_by(CustomerPayment.paid_at.desc()).limit(1500)
     if scope is not None:
         pay_stmt = pay_stmt.where(

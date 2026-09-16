@@ -132,6 +132,8 @@ def compute_expected(
     ) or 0
     khata_collected = Decimal("0")
     for p in db.scalars(pay_stmt).all():
+        if p.reversed_at is not None:
+            continue
         if _payment_shop_date(p.paid_at) != close_date:
             continue
         amt = _n(p.amount)
@@ -164,6 +166,8 @@ def compute_expected(
     )
     vendor_paid = Decimal("0")
     for p in db.scalars(vp_stmt).all():
+        if p.reversed_at is not None:
+            continue
         amt = _n(p.amount)
         if p.branch_id == branch_id:
             vendor_paid += amt
