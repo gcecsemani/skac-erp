@@ -581,7 +581,7 @@ CREATE TABLE IF NOT EXISTS stock_discrepancy (
 	book_qty NUMERIC(14, 3) NOT NULL,
 	counted_qty NUMERIC(14, 3) NOT NULL,
 	variance NUMERIC(14, 3) NOT NULL,
-	status ENUM('open','investigating','resolved') NOT NULL,
+	status ENUM('open','investigating','resolved') NOT NULL DEFAULT 'open',
 	note VARCHAR(255) NOT NULL,
 	resolution VARCHAR(255),
 	created_by_user_id BIGINT,
