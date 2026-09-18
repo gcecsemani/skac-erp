@@ -17,8 +17,9 @@ from app.models.enums import (
     PurchaseOrderStatus,
     TaxType,
     TransferStatus,
+    StockDiscrepancyStatus,
 )
-from app.models.inventory import Batch, Stock, StockMovement
+from app.models.inventory import Batch, Stock, StockDiscrepancy, StockMovement
 from app.models.organization import Branch, Organization
 from app.models.product import Product, ProductUnit
 from app.models.purchase import (
@@ -48,6 +49,7 @@ __all__ = [
     "FieldVisitPhoto",
     "Batch",
     "Stock",
+    "StockDiscrepancy",
     "StockMovement",
     "Branch",
     "Organization",
@@ -83,4 +85,5 @@ __all__ = [
     "DocumentStatus",
     "AccountType",
     "FieldVisitStatus",
+    "StockDiscrepancyStatus",
 ]

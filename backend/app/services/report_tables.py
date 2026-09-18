@@ -10,16 +10,17 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer, CustomerPayment
-from app.models.enums import InvoiceStatus, MovementType
+from app.models.enums import InvoiceStatus, MovementType, StockDiscrepancyStatus
 from app.models.expense import Expense
 from app.models.field_visit import FieldVisit
-from app.models.inventory import Batch, Stock, StockMovement
+from app.models.inventory import Batch, Stock, StockDiscrepancy, StockMovement
 from app.models.organization import Branch
 from app.models.product import Product
 from app.models.purchase import GRN, GRNItem
 from app.models.sales import Invoice, InvoiceItem
 from app.models.user import User
 from app.models.vendor import Vendor
+from app.services.cogs import line_cogs_expr, stock_qty_expr
 
 GROUPS = [
     {"id": "sales", "label": "Sales & margin"},
@@ -56,6 +57,8 @@ CATALOG = [
      "blurb": "Batches expiring in 60 days. Sell, return, or write off before they become unsaleable."},
     {"key": "low_stock", "label": "Reorder", "group": "stock", "needs_dates": False,
      "blurb": "Out of stock or below reorder level. These are lost sales if a farmer walks in tomorrow."},
+    {"key": "stock_reconcile", "label": "Stock reconciliation", "group": "stock", "needs_dates": True,
+     "blurb": "Opening + loaded − sold − returns − transfers should equal stock left. Log a shelf count when it does not, and keep the case open until you find the bags."},
     {"key": "gst", "label": "GST", "group": "accounts", "needs_dates": True,
      "blurb": "Taxable value and tax by slab. Hand this to your CA for the return."},
     {"key": "profit_loss", "label": "Profit & loss", "group": "accounts", "needs_dates": True,
@@ -116,6 +119,7 @@ def run_report(
         "payment_collection": _payment_collection,
         "vendor_stock": _vendor_stock,
         "field_visits": _field_visits,
+        "stock_reconcile": _stock_reconcile,
         "product_profit": _product_profit,
         "product_loss": _product_loss,
         "farmer_profit": _farmer_profit,
@@ -265,7 +269,7 @@ def _product_sales(db, org_id, scope, start, end) -> dict:
             InvoiceItem.product_id,
             InvoiceItem.product_name,
             Product.category,
-            func.coalesce(func.sum(InvoiceItem.quantity), 0),
+            func.coalesce(func.sum(stock_qty_expr()), 0),
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
             func.coalesce(func.sum(InvoiceItem.tax_amount), 0),
             func.coalesce(func.sum(InvoiceItem.line_total), 0),
@@ -306,7 +310,7 @@ def _category_sales(db, org_id, scope, start, end) -> dict:
     stmt = (
         select(
             Product.category,
-            func.coalesce(func.sum(InvoiceItem.quantity), 0),
+            func.coalesce(func.sum(stock_qty_expr()), 0),
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
             func.coalesce(func.sum(InvoiceItem.line_total), 0),
         )
@@ -348,7 +352,7 @@ def _profit_loss(db, org_id, scope, start, end) -> dict:
     )
     sales, tax, discount = db.execute(sales_stmt).one()
     cogs_stmt = (
-        select(func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0))
+        select(func.coalesce(func.sum(line_cogs_expr()), 0))
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
     )
@@ -897,9 +901,9 @@ def _product_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
     stmt = (
         select(
             Product.name, Product.sku,
-            func.coalesce(func.sum(InvoiceItem.quantity), 0),
+            func.coalesce(func.sum(stock_qty_expr()), 0),
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0),
+            func.coalesce(func.sum(line_cogs_expr()), 0),
         )
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
@@ -956,7 +960,7 @@ def _farmer_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
         select(
             Customer.id, Customer.name, Customer.village, Customer.phone,
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0),
+            func.coalesce(func.sum(line_cogs_expr()), 0),
             func.count(func.distinct(Invoice.id)),
         )
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
@@ -1002,3 +1006,197 @@ def _farmer_loss(db, org_id, scope, start, end) -> dict:
     data["rows"] = [r for r in data["rows"] if r["profit"] <= 0] or data["rows"][:25]
     data["summary"] = [{"label": "Profit / (loss)", "value": round(sum(r["profit"] for r in data["rows"]), 2), "money": True}]
     return data
+
+
+def _stock_reconcile(db, org_id, scope, start, end) -> dict:
+    """Opening + inflows − outflows vs book qty left, plus any open count cases."""
+    start_dt = datetime.combine(start, datetime.min.time())
+    end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
+
+    mov_base = select(
+        StockMovement.product_id,
+        StockMovement.branch_id,
+        StockMovement.movement_type,
+        func.coalesce(func.sum(StockMovement.quantity), 0),
+    ).where(
+        StockMovement.organization_id == org_id,
+        StockMovement.occurred_at >= start_dt,
+        StockMovement.occurred_at < end_dt,
+    )
+    if scope is not None:
+        mov_base = mov_base.where(StockMovement.branch_id.in_(scope))
+    mov_base = mov_base.group_by(
+        StockMovement.product_id, StockMovement.branch_id, StockMovement.movement_type,
+    )
+
+    after_base = select(
+        StockMovement.product_id,
+        StockMovement.branch_id,
+        func.coalesce(func.sum(StockMovement.quantity), 0),
+    ).where(
+        StockMovement.organization_id == org_id,
+        StockMovement.occurred_at >= end_dt,
+    )
+    if scope is not None:
+        after_base = after_base.where(StockMovement.branch_id.in_(scope))
+    after_base = after_base.group_by(StockMovement.product_id, StockMovement.branch_id)
+
+    stock_base = select(
+        Stock.product_id,
+        Stock.branch_id,
+        func.coalesce(func.sum(Stock.quantity), 0),
+    ).where(Stock.organization_id == org_id)
+    if scope is not None:
+        stock_base = stock_base.where(Stock.branch_id.in_(scope))
+    stock_base = stock_base.group_by(Stock.product_id, Stock.branch_id)
+
+    by_type: dict[tuple[int, int], dict[str, float]] = {}
+    keys: set[tuple[int, int]] = set()
+
+    def bucket(pid, bid) -> dict[str, float]:
+        k = (int(pid), int(bid))
+        keys.add(k)
+        return by_type.setdefault(k, {})
+
+    for pid, bid, mtype, qty in db.execute(mov_base).all():
+        bucket(pid, bid)[_enum(mtype)] = _qty(qty)
+    after: dict[tuple[int, int], float] = {}
+    for pid, bid, qty in db.execute(after_base).all():
+        k = (int(pid), int(bid))
+        keys.add(k)
+        after[k] = _qty(qty)
+    on_hand_now: dict[tuple[int, int], float] = {}
+    for pid, bid, qty in db.execute(stock_base).all():
+        k = (int(pid), int(bid))
+        if _qty(qty) == 0 and k not in keys:
+            continue
+        keys.add(k)
+        on_hand_now[k] = _qty(qty)
+
+    case_stmt = (
+        select(StockDiscrepancy)
+        .where(StockDiscrepancy.organization_id == org_id)
+        .order_by(StockDiscrepancy.updated_at.desc(), StockDiscrepancy.id.desc())
+    )
+    if scope is not None:
+        case_stmt = case_stmt.where(StockDiscrepancy.branch_id.in_(scope))
+    latest_case: dict[tuple[int, int], StockDiscrepancy] = {}
+    for c in db.scalars(case_stmt).all():
+        k = (int(c.product_id), int(c.branch_id))
+        keys.add(k)
+        latest_case.setdefault(k, c)
+
+    pids = {k[0] for k in keys}
+    bids = {k[1] for k in keys}
+    products = {
+        p.id: p for p in db.scalars(select(Product).where(Product.id.in_(pids))).all()
+    } if pids else {}
+    branches = {
+        b.id: b.name for b in db.scalars(select(Branch).where(Branch.id.in_(bids))).all()
+    } if bids else {}
+
+    def pos(v: float) -> float:
+        return round(v if v > 0 else 0.0, 3)
+
+    def neg(v: float) -> float:
+        return round(-v if v < 0 else 0.0, 3)
+
+    rows = []
+    open_cases = 0
+    ledger_mismatches = 0
+    missing_bags = 0.0
+    for pid, bid in sorted(keys, key=lambda k: ((products.get(k[0]).name if products.get(k[0]) else ""), k[1])):
+        p = products.get(pid)
+        if p is None:
+            continue
+        t = by_type.get((pid, bid), {})
+        loaded = pos(t.get("grn", 0))
+        sold = neg(t.get("sale", 0))
+        sale_ret = pos(t.get("sale_return", 0))
+        purch_ret = neg(t.get("purchase_return", 0))
+        xfer_in = pos(t.get("transfer_in", 0))
+        xfer_out = neg(t.get("transfer_out", 0))
+        adj = round(t.get("adjustment", 0), 3)
+        other = 0.0
+        known = {
+            "grn", "sale", "sale_return", "purchase_return",
+            "transfer_in", "transfer_out", "adjustment",
+        }
+        for mt, q in t.items():
+            if mt not in known:
+                other += q
+        other = round(other, 3)
+        period_net = round(sum(t.values()), 3)
+        book_now = on_hand_now.get((pid, bid), 0.0)
+        book_end = round(book_now - after.get((pid, bid), 0.0), 3)
+        opening = round(book_end - period_net, 3)
+        expected = round(
+            opening + loaded + sale_ret + xfer_in + adj + other - sold - purch_ret - xfer_out, 3
+        )
+        ledger_gap = round(book_end - expected, 3)
+        case = latest_case.get((pid, bid))
+        counted = _qty(case.counted_qty) if case else None
+        gap = _qty(case.variance) if case else None  # counted - book at count time
+        status = _enum(case.status) if case else ""
+        if status in {StockDiscrepancyStatus.open.value, StockDiscrepancyStatus.investigating.value, "open", "investigating"}:
+            open_cases += 1
+            if gap is not None and gap < 0:
+                missing_bags += -gap
+        if abs(ledger_gap) >= 0.001:
+            ledger_mismatches += 1
+        rows.append({
+            "product_id": pid,
+            "branch_id": bid,
+            "case_id": case.id if case else None,
+            "product": p.name,
+            "sku": p.sku or "—",
+            "category": _enum(p.category).replace("_", " ").title(),
+            "branch": branches.get(bid, "—"),
+            "opening": opening,
+            "loaded": loaded,
+            "sold": sold,
+            "sale_return": sale_ret,
+            "purchase_return": purch_ret,
+            "transfer_in": xfer_in,
+            "transfer_out": xfer_out,
+            "adjustment": adj,
+            "expected": expected,
+            "left": book_end,
+            "ledger_gap": ledger_gap,
+            "counted": counted,
+            "gap": gap,
+            "case_status": status or "—",
+            "case_note": (case.note if case else None) or "—",
+            "on_hand_now": book_now,
+        })
+    rows.sort(key=lambda r: (abs(r["ledger_gap"]) + abs(r["gap"] or 0), abs(r["left"])), reverse=True)
+    return {
+        "columns": [
+            {"key": "product", "label": "Product"},
+            {"key": "sku", "label": "SKU"},
+            {"key": "category", "label": "Category"},
+            {"key": "branch", "label": "Branch"},
+            {"key": "counted", "label": "Counted", "num": True},
+            {"key": "gap", "label": "Count gap", "num": True},
+            {"key": "case_status", "label": "Case"},
+            {"key": "opening", "label": "Opening", "num": True},
+            {"key": "loaded", "label": "Loaded", "num": True},
+            {"key": "sold", "label": "Sold", "num": True},
+            {"key": "sale_return", "label": "Sale ret.", "num": True},
+            {"key": "purchase_return", "label": "Purch. ret.", "num": True},
+            {"key": "transfer_in", "label": "Xfer in", "num": True},
+            {"key": "transfer_out", "label": "Xfer out", "num": True},
+            {"key": "adjustment", "label": "Adjust", "num": True},
+            {"key": "expected", "label": "Expected left", "num": True},
+            {"key": "left", "label": "Left (book)", "num": True},
+            {"key": "ledger_gap", "label": "Book gap", "num": True},
+        ],
+        "rows": rows,
+        "summary": [
+            {"label": "SKUs", "value": len(rows)},
+            {"label": "Book mismatches", "value": ledger_mismatches},
+            {"label": "Open cases", "value": open_cases},
+            {"label": "Counted short (packs)", "value": round(missing_bags, 3)},
+        ],
+        "track": True,
+    }

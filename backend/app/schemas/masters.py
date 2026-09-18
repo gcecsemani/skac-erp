@@ -185,3 +185,15 @@ class StockAdjustIn(BaseModel):
     correct_mfg_date: date | None = None
     correct_expiry_date: date | None = None
     correct_purchase_price: Decimal | None = Field(default=None, ge=0)
+
+
+class StockDiscrepancyIn(BaseModel):
+    branch_id: int
+    product_id: int
+    counted_qty: Decimal = Field(ge=0)
+    note: str = Field(min_length=3, max_length=255)
+    count_date: date | None = None
+
+
+class StockDiscrepancyResolveIn(BaseModel):
+    resolution: str = Field(min_length=3, max_length=255)

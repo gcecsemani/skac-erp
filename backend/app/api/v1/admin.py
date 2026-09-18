@@ -14,7 +14,8 @@ from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.core.security import hash_password
 from app.models.audit import AuditLog
-from app.models.inventory import Batch, Stock
+from app.models.enums import StockDiscrepancyStatus
+from app.models.inventory import Batch, Stock, StockDiscrepancy
 from app.models.organization import Branch
 from app.models.product import Product
 from app.models.sales import Invoice, InvoiceItem
@@ -237,7 +238,41 @@ def alerts(
         {"product": n, "reorder_level": float(rl), "on_hand": float(q)}
         for n, rl, q in db.execute(ls_stmt).all() if float(q) <= float(rl)
     ]
-    return {"near_expiry": near_expiry, "low_stock": low_stock}
+
+    case_stmt = (
+        select(StockDiscrepancy, Product.name, Branch.name)
+        .join(Product, Product.id == StockDiscrepancy.product_id)
+        .join(Branch, Branch.id == StockDiscrepancy.branch_id)
+        .where(
+            StockDiscrepancy.organization_id == org_id,
+            StockDiscrepancy.status.in_(
+                (StockDiscrepancyStatus.open, StockDiscrepancyStatus.investigating)
+            ),
+        )
+        .order_by(StockDiscrepancy.updated_at.desc())
+        .limit(20)
+    )
+    if scope is not None:
+        case_stmt = case_stmt.where(StockDiscrepancy.branch_id.in_(scope))
+    stock_cases = [
+        {
+            "id": c.id,
+            "product": pname,
+            "branch": bname,
+            "variance": float(c.variance),
+            "counted_qty": float(c.counted_qty),
+            "book_qty": float(c.book_qty),
+            "status": c.status.value if hasattr(c.status, "value") else str(c.status),
+            "note": c.note,
+        }
+        for c, pname, bname in db.execute(case_stmt).all()
+    ]
+    return {
+        "near_expiry": near_expiry,
+        "low_stock": low_stock,
+        "stock_cases": stock_cases,
+        "stock_case_open": len(stock_cases),
+    }
 
 
 # --- Compliance ---

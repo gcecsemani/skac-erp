@@ -189,6 +189,16 @@ export const api = {
   receiveStock: (r: any) => post("/inventory/receive", r),
   adjustStock: (r: any) => post("/inventory/adjust", r),
   forecast: (onlyNeeding = false) => get<any[]>(`/inventory/forecast?only_needing_purchase=${onlyNeeding}`),
+  logStockCount: (r: any) => post<any>("/inventory/discrepancies", r),
+  investigateStockCase: (id: number) => post<any>(`/inventory/discrepancies/${id}/investigate`, {}),
+  resolveStockCase: (id: number, resolution: string) =>
+    post<any>(`/inventory/discrepancies/${id}/resolve`, { resolution }),
+  stockTrail: (productId: number, branchId: number, start?: string, end?: string) => {
+    const p = new URLSearchParams({ product_id: String(productId), branch_id: String(branchId) });
+    if (start) p.set("start", start);
+    if (end) p.set("end", end);
+    return get<any>(`/inventory/trail?${p.toString()}`);
+  },
 
   // sales
   createInvoice: (payload: any) => post<any>("/sales/invoices", payload),

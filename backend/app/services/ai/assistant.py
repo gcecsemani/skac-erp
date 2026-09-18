@@ -81,6 +81,7 @@ def _match_report_key(q: str) -> str | None:
         ("customer_outstanding", ("customer outstanding", "farmer outstanding", "khata outstanding")),
         ("low_stock", ("low stock", "below reorder")),
         ("expiry", ("expir", "near expiry")),
+        ("stock_reconcile", ("stock reconcil", "stock missing", "stock mismatch", "stock count")),
         ("stock_movement", ("stock movement",)),
         ("inventory", ("inventory report", "stock on hand", "stock report")),
         ("gst", ("gst",)),

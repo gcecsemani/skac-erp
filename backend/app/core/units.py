@@ -15,6 +15,9 @@ _GENERIC = {"unit", "units", "packet", "pcs", "nos"}
 _SI_FAMILY = {"litre", "liter", "l", "kg", "kilogram", "g", "gm", "gms"}
 _STOCK_QTY = Decimal("0.001")
 _LOOSE_ALIASES = {"kg", "kgs", "kilogram", "kilograms", "g", "gm", "gms", "gram", "grams"}
+# Invoice lines billed in these units are loose weight, not whole packs.
+# Used by SQL COGS so 10 kg from a 50 kg bag is costed as 0.2 bags, not 10 bags.
+LOOSE_BILLED_UNITS = frozenset(_LOOSE_ALIASES | {"1kg", "1g"})
 
 _UNIT_MAP = {
     "mls": "ml",

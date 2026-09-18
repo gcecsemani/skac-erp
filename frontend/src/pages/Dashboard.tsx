@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -212,6 +213,25 @@ export default function Dashboard() {
                       { key: "reorder_level", label: "Reorder", num: true },
                     ]}
                     rows={alerts.low_stock}
+                  />
+                </div>
+              )}
+              {(alerts?.stock_cases || []).length > 0 && (
+                <div style={{ marginTop: 14 }}>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                    Stock mismatches ({alerts.stock_case_open} open){" "}
+                    <Link to="/reports?report=stock_reconcile">open reconciliation</Link>
+                  </div>
+                  <Table
+                    columns={[
+                      { key: "product", label: "Product" },
+                      { key: "branch", label: "Branch" },
+                      { key: "variance", label: "Gap", num: true, render: (r) => (
+                        <Badge tone={Number(r.variance) < 0 ? "danger" : "warn"}>{r.variance}</Badge>
+                      ) },
+                      { key: "status", label: "Case" },
+                    ]}
+                    rows={alerts.stock_cases}
                   />
                 </div>
               )}

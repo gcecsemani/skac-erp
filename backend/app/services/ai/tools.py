@@ -20,8 +20,9 @@ from app.models.enums import InvoiceStatus, ProductCategory
 from app.models.expense import Expense
 from app.models.product import Product
 from app.models.sales import Invoice, InvoiceItem
-from app.services.ai import forecasting
 from app.services import report_tables
+from app.services.ai import forecasting
+from app.services.cogs import line_cogs_expr, stock_qty_expr
 
 
 @dataclass
@@ -105,10 +106,11 @@ def top_selling_products(ctx: ToolContext, period: str = "this_month", limit: in
         select(
             InvoiceItem.product_id,
             InvoiceItem.product_name,
-            func.sum(InvoiceItem.quantity).label("qty"),
+            func.sum(stock_qty_expr()).label("qty"),
             func.sum(InvoiceItem.line_total).label("revenue"),
         )
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+        .join(Product, Product.id == InvoiceItem.product_id)
         .group_by(InvoiceItem.product_id, InvoiceItem.product_name)
         .order_by(func.sum(InvoiceItem.line_total).desc())
         .limit(limit)
@@ -117,9 +119,7 @@ def top_selling_products(ctx: ToolContext, period: str = "this_month", limit: in
         Invoice.invoice_date >= start, Invoice.invoice_date <= end
     )
     if category:
-        stmt = stmt.join(Product, Product.id == InvoiceItem.product_id).where(
-            Product.category == ProductCategory(category)
-        )
+        stmt = stmt.where(Product.category == ProductCategory(category))
     rows = ctx.db.execute(stmt).all()
     items = [
         {"product": r.product_name, "quantity": float(r.qty or 0),
@@ -166,12 +166,12 @@ def sales_summary(ctx: ToolContext, period: str = "today") -> dict:
 
 
 def profit_summary(ctx: ToolContext, period: str = "this_month") -> dict:
-    """Estimated gross profit = taxable revenue - (qty * product purchase price)."""
+    """Estimated gross profit = taxable revenue - pack-equivalent COGS."""
     start, end = _period_range(period)
     stmt = (
         select(
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0).label("revenue"),
-            func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0).label("cost"),
+            func.coalesce(func.sum(line_cogs_expr()), 0).label("cost"),
         )
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)

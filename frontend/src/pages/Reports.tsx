@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { inr, localISODate } from "../format";
-import { Card, ExportButtons, Loading, PageHeader, Table } from "../components/ui";
+import { inr, localISODate, matchesQuery, num } from "../format";
+import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, Table } from "../components/ui";
+import * as V from "../validate";
 
 type ReportDef = {
   key: string;
@@ -46,11 +47,19 @@ const REPORTS: ReportDef[] = [
     blurb: "Batches expiring in 60 days. Sell, return, or write off before they become unsaleable." },
   { key: "low_stock", label: "Reorder", group: "stock", needsDates: false,
     blurb: "Out of stock or below reorder level. These are lost sales if a farmer walks in tomorrow." },
+  { key: "stock_reconcile", label: "Stock reconciliation", group: "stock", needsDates: true,
+    blurb: "Opening + loaded − sold − returns − transfers should equal stock left. Log a shelf count when it does not, and keep the case open until you find the bags." },
   { key: "gst", label: "GST", group: "accounts", needsDates: true,
     blurb: "Taxable value and tax by slab. Hand this to your CA for the return." },
   { key: "profit_loss", label: "Profit & loss", group: "accounts", needsDates: true,
     blurb: "Sales minus GST, product cost, and expenses. The number that says whether the shop made money." },
 ];
+
+function reportFromQuery() {
+  const r = new URLSearchParams(window.location.search).get("report");
+  const found = REPORTS.find((x) => x.key === r);
+  return found ? { group: found.group, key: found.key } : { group: "sales", key: "daily_sales" };
+}
 
 const monthStart = () => {
   const d = new Date();
@@ -58,9 +67,34 @@ const monthStart = () => {
 };
 const today = () => localISODate();
 
+const QTY_KEYS = new Set([
+  "opening", "loaded", "sold", "sale_return", "purchase_return",
+  "transfer_in", "transfer_out", "adjustment", "expected", "left",
+  "ledger_gap", "counted", "gap",
+]);
+
+function qtyCell(v: any) {
+  if (v === null || v === undefined || v === "") return "—";
+  return num(v);
+}
+
+function gapTone(v: any): "success" | "danger" | "neutral" {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return "neutral";
+  return n < 0 ? "danger" : "success";
+}
+
+function caseTone(s: string): "danger" | "warn" | "success" | "neutral" {
+  if (s === "open") return "danger";
+  if (s === "investigating") return "warn";
+  if (s === "resolved") return "success";
+  return "neutral";
+}
+
 export default function Reports() {
-  const [group, setGroup] = useState("sales");
-  const [key, setKey] = useState("daily_sales");
+  const initial = reportFromQuery();
+  const [group, setGroup] = useState(initial.group);
+  const [key, setKey] = useState(initial.key);
   const [branches, setBranches] = useState<any[]>([]);
   const [branchId, setBranchId] = useState(0);
   const [start, setStart] = useState(monthStart);
@@ -68,9 +102,27 @@ export default function Reports() {
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [q, setQ] = useState("");
+  const [category, setCategory] = useState("all");
+  const [view, setView] = useState("all");
+  const [countRow, setCountRow] = useState<any | null>(null);
+  const [countForm, setCountForm] = useState({ counted: "", note: "" });
+  const [countErr, setCountErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [resolveRow, setResolveRow] = useState<any | null>(null);
+  const [resolution, setResolution] = useState("");
+  const [resolveErr, setResolveErr] = useState("");
+  const [traceRow, setTraceRow] = useState<any | null>(null);
+  const [trail, setTrail] = useState<any | null>(null);
+  const [trailBusy, setTrailBusy] = useState(false);
 
   const current = REPORTS.find((r) => r.key === key) || REPORTS[0];
   const inGroup = useMemo(() => REPORTS.filter((r) => r.group === group), [group]);
+  const isRecon = key === "stock_reconcile";
+
+  const reload = () => api.runReport(key, {
+    branchId: branchId || undefined, start, end,
+  }).then(setData);
 
   useEffect(() => { api.branches().then(setBranches).catch(() => setBranches([])); }, []);
 
@@ -93,14 +145,72 @@ export default function Reports() {
     setGroup(id);
     const first = REPORTS.find((r) => r.group === id);
     if (first) setKey(first.key);
+    setQ(""); setCategory("all"); setView("all");
   };
 
-  const columns = (data?.columns || []).map((c: any) => ({
-    key: c.key,
-    label: c.label,
-    num: !!c.num,
-    render: c.money ? (r: any) => inr(r[c.key]) : undefined,
-  }));
+  const rows = useMemo(() => {
+    const src = data?.rows || [];
+    if (!isRecon) return src;
+    return src.filter((r: any) => {
+      if (category !== "all" && String(r.category || "").toLowerCase() !== category) return false;
+      if (!matchesQuery(q, r.product, r.sku, r.branch, r.case_note)) return false;
+      const ledger = Math.abs(Number(r.ledger_gap) || 0) >= 0.001;
+      const countGap = r.gap != null && Math.abs(Number(r.gap)) >= 0.001;
+      const open = r.case_status === "open" || r.case_status === "investigating";
+      if (view === "mismatches") return ledger || countGap || open;
+      if (view === "open") return open;
+      if (view === "short") return Number(r.gap) < 0 || (r.gap == null && Number(r.ledger_gap) < 0);
+      return true;
+    });
+  }, [data, isRecon, q, category, view]);
+
+  const columns = (data?.columns || []).map((c: any) => {
+    const col: any = { key: c.key, label: c.label, num: !!c.num };
+    if (c.money) col.render = (r: any) => inr(r[c.key]);
+    else if (c.key === "ledger_gap" || c.key === "gap") {
+      col.render = (r: any) => {
+        const v = r[c.key];
+        if (v === null || v === undefined) return "—";
+        return <Badge tone={gapTone(v)}>{num(v)}</Badge>;
+      };
+    } else if (c.key === "case_status") {
+      col.render = (r: any) => <Badge tone={caseTone(r.case_status)}>{r.case_status || "—"}</Badge>;
+    } else if (QTY_KEYS.has(c.key)) {
+      col.render = (r: any) => qtyCell(r[c.key]);
+    }
+    return col;
+  });
+  if (isRecon) {
+    columns.push({
+      key: "actions",
+      label: "",
+      render: (r: any) => (
+        <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => {
+            setCountErr("");
+            setCountRow(r);
+            setCountForm({ counted: r.counted != null ? String(r.counted) : String(r.on_hand_now ?? r.left ?? ""), note: r.case_note && r.case_note !== "—" ? r.case_note : "" });
+          }}>Log count</button>
+          <button className="btn btn-ghost btn-sm" onClick={async () => {
+            setTraceRow(r);
+            setTrail(null);
+            setTrailBusy(true);
+            try {
+              if (r.case_id && r.case_status === "open") {
+                await api.investigateStockCase(r.case_id);
+                reload();
+              }
+              setTrail(await api.stockTrail(r.product_id, r.branch_id, start, end));
+            } catch (e: any) { setErr(e.message); setTraceRow(null); }
+            finally { setTrailBusy(false); }
+          }}>Trace</button>
+          {r.case_id && r.case_status !== "resolved" && (
+            <button className="btn btn-ghost btn-sm" onClick={() => { setResolveRow(r); setResolution(""); setResolveErr(""); }}>Resolve</button>
+          )}
+        </div>
+      ),
+    });
+  }
   const exportCols = (data?.columns || []).map((c: any) => ({
     key: c.key, label: c.label, num: !!c.num, money: !!c.money,
   }));
@@ -110,8 +220,8 @@ export default function Reports() {
     <div>
       <PageHeader
         title="Reports"
-        subtitle="Fifteen reports that answer how the shops are doing — export any of them to Excel or PDF"
-        actions={data ? <ExportButtons title={data.title} subtitle={subtitle} columns={exportCols} rows={data.rows || []} /> : undefined}
+        subtitle={`${REPORTS.length} reports that answer how the shops are doing — export any of them to Excel or PDF`}
+        actions={data ? <ExportButtons title={data.title} subtitle={subtitle} columns={exportCols} rows={rows} /> : undefined}
       />
 
       <div className="tabs">
@@ -144,6 +254,23 @@ export default function Reports() {
           ) : (
             <span className="muted" style={{ fontSize: 13 }}>Snapshot as of today — date range does not apply</span>
           )}
+          {isRecon && (
+            <>
+              <SearchInput value={q} onChange={setQ} placeholder="Search product / SKU…" />
+              <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ width: "auto" }}>
+                <option value="all">All categories</option>
+                <option value="fertilizer">Fertilizer</option>
+                <option value="pesticide">Pesticide</option>
+                <option value="seed">Seed</option>
+              </select>
+              <select value={view} onChange={(e) => setView(e.target.value)} style={{ width: "auto" }}>
+                <option value="all">All activity</option>
+                <option value="mismatches">Mismatches only</option>
+                <option value="open">Open cases</option>
+                <option value="short">Counted short</option>
+              </select>
+            </>
+          )}
         </div>
         {err && <div className="error">{err}</div>}
         {busy && !data ? <Loading /> : (
@@ -158,10 +285,112 @@ export default function Reports() {
                 ))}
               </div>
             )}
-            <Table columns={columns} rows={data?.rows || []} empty="No rows for this period" pageSize={50} />
+            <Table columns={columns} rows={rows} empty="No rows for this period" pageSize={50} />
           </>
         )}
       </Card>
+
+      {countRow && (
+        <Modal title="Log shelf count" onClose={() => setCountRow(null)}
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setCountRow(null)} disabled={saving}>Cancel</button>
+            <button className="btn btn-primary" disabled={saving} onClick={async () => {
+              setCountErr("");
+              const msg = V.firstError(
+                V.nonNegative(countForm.counted, "Counted qty"),
+                V.minLen(countForm.note, "Note", 3),
+              );
+              if (msg) { setCountErr(msg); return; }
+              setSaving(true);
+              try {
+                await api.logStockCount({
+                  branch_id: countRow.branch_id,
+                  product_id: countRow.product_id,
+                  counted_qty: Number(countForm.counted),
+                  note: countForm.note.trim(),
+                  count_date: localISODate(),
+                });
+                setCountRow(null);
+                await reload();
+              } catch (e: any) { setCountErr(e.message); }
+              finally { setSaving(false); }
+            }}>{saving ? "Saving…" : "Save count"}</button>
+          </>}>
+          {countErr && <div className="error">{countErr}</div>}
+          <p className="muted" style={{ marginTop: 0 }}>
+            {countRow.product} · {countRow.branch} · book on hand now <strong>{num(countRow.on_hand_now)}</strong>
+          </p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            Count the bags on the shelf. If this is short of book, a case stays open until you find the movement (bill, transfer, return) or write the reason and resolve it.
+          </p>
+          <div className="grid grid-2">
+            <Field label="Counted qty (packs)" required>
+              <input type="number" min={0} step="0.001" value={countForm.counted}
+                onChange={(e) => setCountForm({ ...countForm, counted: e.target.value })} />
+            </Field>
+            <Field label="What looks wrong" required>
+              <input value={countForm.note} onChange={(e) => setCountForm({ ...countForm, note: e.target.value })}
+                placeholder="Short 3 bags vs book / found extra" />
+            </Field>
+          </div>
+        </Modal>
+      )}
+
+      {resolveRow && (
+        <Modal title="Resolve stock case" onClose={() => setResolveRow(null)}
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setResolveRow(null)} disabled={saving}>Cancel</button>
+            <button className="btn btn-primary" disabled={saving} onClick={async () => {
+              setResolveErr("");
+              const msg = V.minLen(resolution, "Resolution", 3);
+              if (msg) { setResolveErr(msg); return; }
+              setSaving(true);
+              try {
+                await api.resolveStockCase(resolveRow.case_id, resolution.trim());
+                setResolveRow(null);
+                await reload();
+              } catch (e: any) { setResolveErr(e.message); }
+              finally { setSaving(false); }
+            }}>{saving ? "Saving…" : "Close case"}</button>
+          </>}>
+          {resolveErr && <div className="error">{resolveErr}</div>}
+          <p className="muted" style={{ marginTop: 0 }}>
+            {resolveRow.product} · gap {num(resolveRow.gap)} · {resolveRow.case_note}
+          </p>
+          <Field label="How it was found / fixed" required>
+            <input value={resolution} onChange={(e) => setResolution(e.target.value)}
+              placeholder="Found in godown / billed on wrong SKU / shrinkage" />
+          </Field>
+        </Modal>
+      )}
+
+      {traceRow && (
+        <Modal title={`Trace · ${traceRow.product}`} onClose={() => { setTraceRow(null); setTrail(null); }} wide>
+          {trailBusy && !trail ? <Loading /> : (
+            <>
+              <p className="muted" style={{ marginTop: 0 }}>
+                {traceRow.branch} · {trail?.start} to {trail?.end} · opening {num(trail?.opening)} → book left {num(trail?.closing)} · on hand now {num(trail?.on_hand_now)}
+              </p>
+              {traceRow.case_note && traceRow.case_note !== "—" && (
+                <p className="muted" style={{ fontSize: 12 }}>Case note: {traceRow.case_note}</p>
+              )}
+              <Table
+                columns={[
+                  { key: "when", label: "When" },
+                  { key: "type", label: "Type" },
+                  { key: "batch", label: "Batch" },
+                  { key: "qty", label: "Qty", num: true, render: (r: any) => num(r.qty) },
+                  { key: "running", label: "Running", num: true, render: (r: any) => num(r.running) },
+                  { key: "note", label: "Note" },
+                ]}
+                rows={trail?.rows || []}
+                empty="No movements in this period — the gap is before this range or never entered the ledger"
+                pageSize={30}
+              />
+            </>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }

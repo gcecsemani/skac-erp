@@ -573,6 +573,31 @@ CREATE TABLE IF NOT EXISTS stock_movement (
 	FOREIGN KEY(batch_id) REFERENCES batch (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS stock_discrepancy (
+	organization_id BIGINT NOT NULL,
+	branch_id BIGINT NOT NULL,
+	product_id BIGINT NOT NULL,
+	count_date DATE NOT NULL,
+	book_qty NUMERIC(14, 3) NOT NULL,
+	counted_qty NUMERIC(14, 3) NOT NULL,
+	variance NUMERIC(14, 3) NOT NULL,
+	status ENUM('open','investigating','resolved') NOT NULL,
+	note VARCHAR(255) NOT NULL,
+	resolution VARCHAR(255),
+	created_by_user_id BIGINT,
+	resolved_by_user_id BIGINT,
+	resolved_at DATETIME,
+	id BIGINT NOT NULL AUTO_INCREMENT,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	FOREIGN KEY(organization_id) REFERENCES organization (id),
+	FOREIGN KEY(branch_id) REFERENCES branch (id),
+	FOREIGN KEY(product_id) REFERENCES product (id),
+	FOREIGN KEY(created_by_user_id) REFERENCES `user` (id),
+	FOREIGN KEY(resolved_by_user_id) REFERENCES `user` (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS stock_transfer_item (
 	transfer_id BIGINT NOT NULL, 
 	product_id BIGINT NOT NULL, 
@@ -725,6 +750,13 @@ CREATE INDEX IF NOT EXISTS ix_field_visit_visited_by_user_id ON field_visit (vis
 CREATE INDEX IF NOT EXISTS ix_field_visit_customer_id ON field_visit (customer_id);
 CREATE INDEX IF NOT EXISTS ix_field_visit_status ON field_visit (status);
 CREATE INDEX IF NOT EXISTS ix_field_visit_photo_visit_id ON field_visit_photo (visit_id);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_organization_id ON stock_discrepancy (organization_id);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_branch_id ON stock_discrepancy (branch_id);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_product_id ON stock_discrepancy (product_id);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_count_date ON stock_discrepancy (count_date);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_status ON stock_discrepancy (status);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_org_status ON stock_discrepancy (organization_id, status);
+CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_org_product ON stock_discrepancy (organization_id, product_id, branch_id);
 
 CREATE TABLE IF NOT EXISTS config_item (
 	organization_id BIGINT NOT NULL,

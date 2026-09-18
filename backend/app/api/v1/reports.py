@@ -19,6 +19,7 @@ from app.models.organization import Branch
 from app.models.product import Product
 from app.models.sales import Invoice, InvoiceItem
 from app.models.vendor import Vendor
+from app.services.cogs import line_cogs_expr
 from app.services.report_tables import run_report, visible_catalog
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -157,7 +158,7 @@ def dashboard(
     gp_stmt = (
         select(
             func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.quantity * Product.purchase_price), 0),
+            func.coalesce(func.sum(line_cogs_expr()), 0),
         )
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
