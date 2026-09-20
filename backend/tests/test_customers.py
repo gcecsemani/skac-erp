@@ -2,10 +2,14 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
-from app.api.v1.customers import list_customers
+import pytest
+from fastapi import HTTPException
+
+from app.api.v1.customers import create_customer, list_customers
 from app.core.deps import CurrentUser
 from app.models.customer import Customer
 from app.models.user import Role, User
+from app.schemas.masters import CustomerCreate
 from app.services import billing
 
 
@@ -84,3 +88,50 @@ def test_customer_bills_include_line_items(db, org, branch, make_product, receiv
     assert len(bills) == 1
     assert bills[0]["items"][0]["product_name"] == "UREA 50KG"
     assert bills[0]["items"][0]["quantity"] == 2.0
+
+
+def test_create_customer_restores_soft_deleted_same_phone(db, org):
+    current = _current(db, org)
+    old = Customer(
+        organization_id=org.id, name="VENAYAGAM", phone="8098521749",
+        village="Aarpakkam", district="Tiruvannamalai", is_deleted=True,
+    )
+    db.add(old)
+    db.flush()
+
+    restored = create_customer(
+        CustomerCreate(
+            name="VENAYAGAM",
+            phone="8098521749",
+            village="AARPAKKAM",
+            district="Tiruvannamalai",
+        ),
+        current=current,
+        db=db,
+    )
+    db.refresh(old)
+    assert restored.id == old.id
+    assert old.is_deleted is False
+    assert old.village == "AARPAKKAM"
+
+
+def test_create_customer_rejects_duplicate_active_phone(db, org):
+    current = _current(db, org)
+    db.add(Customer(
+        organization_id=org.id, name="Existing", phone="8098521749",
+        village="Aarpakkam", district="Tiruvannamalai",
+    ))
+    db.flush()
+
+    with pytest.raises(HTTPException) as err:
+        create_customer(
+            CustomerCreate(
+                name="VENAYAGAM",
+                phone="8098521749",
+                village="AARPAKKAM",
+                district="Tiruvannamalai",
+            ),
+            current=current,
+            db=db,
+        )
+    assert err.value.status_code == 409

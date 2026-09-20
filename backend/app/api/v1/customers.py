@@ -48,6 +48,33 @@ def _assert_unique_aadhaar(db: Session, org_id: int, aadhaar: str | None, exclud
         raise HTTPException(status_code=409, detail="A farmer with this Aadhaar number already exists")
 
 
+def _find_by_phone(
+    db: Session, org_id: int, phone: str | None, exclude_id: int | None = None
+) -> Customer | None:
+    """Phone uniqueness is org-wide, including soft-deleted farmers."""
+    if not phone:
+        return None
+    stmt = select(Customer).where(
+        Customer.organization_id == org_id,
+        Customer.phone == phone,
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Customer.id != exclude_id)
+    return db.scalar(stmt)
+
+
+def _assert_unique_phone(db: Session, org_id: int, phone: str | None, exclude_id: int | None = None) -> None:
+    existing = _find_by_phone(db, org_id, phone, exclude_id=exclude_id)
+    if existing is None:
+        return
+    if existing.is_deleted:
+        raise HTTPException(
+            status_code=409,
+            detail="This phone belongs to a deleted farmer. Add them again from POS to restore the old record.",
+        )
+    raise HTTPException(status_code=409, detail="A farmer with this phone number already exists")
+
+
 def _attach_last_bill_dates(db: Session, org_id: int, customers: list[Customer]) -> list[Customer]:
     """POS picker uses this to tell walk-in staff who still shops here."""
     ids = [c.id for c in customers]
@@ -105,6 +132,24 @@ def create_customer(
     data = payload.model_dump()
     data["aadhaar_no"] = _normalize_aadhaar(data.get("aadhaar_no"))
     _assert_unique_aadhaar(db, current.organization_id, data["aadhaar_no"])
+    existing = _find_by_phone(db, current.organization_id, data.get("phone"))
+    if existing is not None and not existing.is_deleted:
+        raise HTTPException(status_code=409, detail="A farmer with this phone number already exists")
+    if existing is not None and existing.is_deleted:
+        # Dump/legacy deletes keep the phone unique, so recreating the same
+        # farmer must restore the old row (and their bill history) instead of INSERT.
+        for key, value in data.items():
+            setattr(existing, key, value)
+        existing.is_deleted = False
+        existing.deleted_at = None
+        record_audit(
+            db, action="restore", entity_type="customer", entity_id=existing.id,
+            actor_user_id=current.id, organization_id=current.organization_id,
+            changes=payload.model_dump(mode="json"),
+        )
+        db.commit()
+        db.refresh(existing)
+        return _attach_last_bill_dates(db, current.organization_id, [existing])[0]
     customer = Customer(organization_id=current.organization_id, **data)
     db.add(customer)
     db.flush()
@@ -136,6 +181,7 @@ def update_customer(
     data = payload.model_dump()
     data["aadhaar_no"] = _normalize_aadhaar(data.get("aadhaar_no"))
     _assert_unique_aadhaar(db, current.organization_id, data["aadhaar_no"], exclude_id=customer.id)
+    _assert_unique_phone(db, current.organization_id, data.get("phone"), exclude_id=customer.id)
     for key, value in data.items():
         setattr(customer, key, value)
     record_audit(
