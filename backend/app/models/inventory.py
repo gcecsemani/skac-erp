@@ -80,6 +80,11 @@ class StockMovement(Base, PKMixin, TimestampMixin):
             "ix_stock_movement_org_prod_type_at",
             "organization_id", "product_id", "movement_type", "occurred_at",
         ),
+        # The stock trail always scopes to one branch + SKU over a date range.
+        Index(
+            "ix_stock_movement_org_branch_prod_at",
+            "organization_id", "branch_id", "product_id", "occurred_at",
+        ),
     )
 
     organization_id: Mapped[int] = mapped_column(

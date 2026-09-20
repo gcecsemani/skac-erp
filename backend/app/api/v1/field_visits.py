@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, aliased, selectinload
+from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -122,7 +122,7 @@ def list_staff(
     current: CurrentUser = Depends(require_permission(rbac.P_FIELD_VISIT)),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    rows = db.scalars(select(User).where(
+    rows = db.scalars(select(User).options(joinedload(User.role)).where(
         User.organization_id == current.organization_id,
         User.is_deleted.is_(False),
         User.is_active.is_(True),

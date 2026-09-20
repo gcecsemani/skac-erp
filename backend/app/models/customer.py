@@ -16,6 +16,8 @@ class Customer(Base, PKMixin, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         UniqueConstraint("organization_id", "phone", name="uq_customer_org_phone"),
         Index("ix_customer_org_name", "organization_id", "name"),
+        # Khata lists filter on a positive balance and sort by it.
+        Index("ix_customer_org_outstanding", "organization_id", "outstanding_balance"),
     )
 
     organization_id: Mapped[int] = mapped_column(

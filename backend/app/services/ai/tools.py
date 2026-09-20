@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 from typing import Callable
 
 from sqlalchemy import func, or_, select
@@ -22,7 +21,7 @@ from app.models.product import Product
 from app.models.sales import Invoice, InvoiceItem
 from app.services import report_tables
 from app.services.ai import forecasting
-from app.services.cogs import line_cogs_expr, stock_qty_expr
+from app.services.cogs import grouped_totals, line_totals_stmt, overall_totals
 
 
 @dataclass
@@ -103,29 +102,23 @@ def _scope(stmt, ctx: ToolContext):
 def top_selling_products(ctx: ToolContext, period: str = "this_month", limit: int = 10, category: str | None = None) -> dict:
     start, end = _period_range(period)
     stmt = (
-        select(
-            InvoiceItem.product_id,
-            InvoiceItem.product_name,
-            func.sum(stock_qty_expr()).label("qty"),
-            func.sum(InvoiceItem.line_total).label("revenue"),
-        )
+        line_totals_stmt(InvoiceItem.product_id, InvoiceItem.product_name)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
-        .group_by(InvoiceItem.product_id, InvoiceItem.product_name)
-        .order_by(func.sum(InvoiceItem.line_total).desc())
-        .limit(limit)
     )
     stmt = _scope(stmt, ctx).where(
         Invoice.invoice_date >= start, Invoice.invoice_date <= end
     )
     if category:
         stmt = stmt.where(Product.category == ProductCategory(category))
-    rows = ctx.db.execute(stmt).all()
+    # Loose kg lines are folded to pack equivalents in Python, so the top-N cut
+    # happens here rather than in SQL.
     items = [
-        {"product": r.product_name, "quantity": float(r.qty or 0),
-         "revenue": round(float(r.revenue or 0), 2)}
-        for r in rows
+        {"product": name, "quantity": float(t.qty), "revenue": round(float(t.total), 2)}
+        for (_pid, name), t in grouped_totals(ctx.db, stmt).items()
     ]
+    items.sort(key=lambda r: r["revenue"], reverse=True)
+    items = items[:limit]
     return _with_report(
         {"period": period, "items": items},
         f"Top selling products ({period})",
@@ -169,19 +162,16 @@ def profit_summary(ctx: ToolContext, period: str = "this_month") -> dict:
     """Estimated gross profit = taxable revenue - pack-equivalent COGS."""
     start, end = _period_range(period)
     stmt = (
-        select(
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0).label("revenue"),
-            func.coalesce(func.sum(line_cogs_expr()), 0).label("cost"),
-        )
+        line_totals_stmt()
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
     )
     stmt = _scope(stmt, ctx).where(
         Invoice.invoice_date >= start, Invoice.invoice_date <= end
     )
-    row = ctx.db.execute(stmt).one()
-    revenue = float(row.revenue or 0)
-    cost = float(row.cost or 0)
+    totals = overall_totals(ctx.db, stmt)
+    revenue = float(totals.taxable)
+    cost = float(totals.cogs)
     data = {
         "period": period,
         "revenue": round(revenue, 2),
@@ -204,23 +194,29 @@ def profit_summary(ctx: ToolContext, period: str = "this_month") -> dict:
 
 
 def highest_margin_products(ctx: ToolContext, limit: int = 10, min_margin_pct: float | None = None) -> dict:
-    products = ctx.db.scalars(
-        select(Product).where(
-            Product.organization_id == ctx.organization_id,
-            Product.is_deleted.is_(False),
-        )
-    ).all()
-    out = []
-    for p in products:
-        if p.sale_price and p.sale_price > 0:
-            margin = float((p.sale_price - p.purchase_price) / p.sale_price * 100)
-            out.append({"product": p.name, "margin_pct": round(margin, 1),
-                        "sale_price": float(p.sale_price),
-                        "purchase_price": float(p.purchase_price)})
+    # Margin is pure master-data arithmetic; rank and cut it in SQL rather than
+    # hydrating every product row to pick the top few.
+    margin = (Product.sale_price - Product.purchase_price) / Product.sale_price * 100
+    stmt = select(
+        Product.name, Product.purchase_price, Product.sale_price, margin
+    ).where(
+        Product.organization_id == ctx.organization_id,
+        Product.is_deleted.is_(False),
+        Product.sale_price > 0,
+    )
     if min_margin_pct is not None:
-        out = [o for o in out if o["margin_pct"] >= min_margin_pct]
-    out.sort(key=lambda o: o["margin_pct"], reverse=True)
-    items = out[:limit]
+        stmt = stmt.where(margin >= min_margin_pct)
+    stmt = stmt.order_by(margin.desc()).limit(limit)
+
+    items = [
+        {
+            "product": name,
+            "purchase_price": float(cost),
+            "sale_price": float(price),
+            "margin_pct": round(float(pct), 1),
+        }
+        for name, cost, price, pct in ctx.db.execute(stmt).all()
+    ]
     return _with_report(
         {"items": items},
         "Highest-margin products",

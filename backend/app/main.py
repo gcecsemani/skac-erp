@@ -90,6 +90,18 @@ def _ensure_schema() -> None:
         "ix_stock_movement_org_prod_type_at",
         "organization_id, product_id, movement_type, occurred_at",
     )
+    add_index(
+        "stock_movement",
+        "ix_stock_movement_org_branch_prod_at",
+        "organization_id, branch_id, product_id, occurred_at",
+    )
+    add_index(
+        "invoice", "ix_invoice_customer_status_date", "customer_id, status, invoice_date"
+    )
+    add_index(
+        "customer", "ix_customer_org_outstanding", "organization_id, outstanding_balance"
+    )
+    add_index("field_visit", "ix_field_visit_org_date", "organization_id, visit_date")
     db = SessionLocal()
     try:
         from app.seed import ensure_roles

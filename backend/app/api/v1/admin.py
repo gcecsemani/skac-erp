@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core import rbac
 from app.core.audit import record_audit
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.core.security import hash_password
@@ -22,6 +23,9 @@ from app.models.sales import Invoice, InvoiceItem
 from app.models.user import Role, User
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+# Cap for the dashboard alert lists; the full sets live in Reports.
+ALERT_LIMIT = 200
 
 
 # --- Users & roles ---
@@ -204,7 +208,7 @@ def alerts(
     scope = None if current.sees_all_branches else (current.branch_ids or [-1])
     today = date.today()
 
-    # Near-expiry (next 30 days).
+    # Near-expiry (next settings.near_expiry_days days).
     ne_stmt = (
         select(Product.name, Batch.batch_no, Batch.expiry_date, func.sum(Stock.quantity))
         .join(Stock, Stock.batch_id == Batch.id)
@@ -212,31 +216,38 @@ def alerts(
         .where(
             Batch.organization_id == org_id, Stock.quantity > 0,
             Batch.expiry_date.is_not(None),
-            Batch.expiry_date <= today + timedelta(days=30), Batch.expiry_date >= today,
+            Batch.expiry_date <= today + timedelta(days=settings.near_expiry_days),
+            Batch.expiry_date >= today,
         )
         .group_by(Batch.id, Product.name, Batch.batch_no, Batch.expiry_date)
     )
     if scope is not None:
         ne_stmt = ne_stmt.where(Stock.branch_id.in_(scope))
+    # Soonest-to-expire first, capped — this endpoint is polled by the
+    # dashboard and an unbounded list grew with the whole batch table.
+    ne_stmt = ne_stmt.order_by(Batch.expiry_date.asc()).limit(ALERT_LIMIT)
     near_expiry = [
         {"product": n, "batch_no": b, "expiry_date": e.isoformat(),
          "days_left": (e - today).days, "quantity": float(q)}
         for n, b, e, q in db.execute(ne_stmt).all()
     ]
-    near_expiry.sort(key=lambda x: x["days_left"])
 
-    # Low stock (on-hand below reorder level).
+    # Low stock (on-hand below reorder level). Filtered in SQL via HAVING.
+    on_hand = func.coalesce(func.sum(Stock.quantity), 0)
     ls_stmt = (
-        select(Product.name, Product.reorder_level, func.coalesce(func.sum(Stock.quantity), 0))
+        select(Product.name, Product.reorder_level, on_hand)
         .join(Stock, Stock.product_id == Product.id)
         .where(Product.organization_id == org_id, Product.reorder_level > 0)
         .group_by(Product.id, Product.name, Product.reorder_level)
+        .having(on_hand <= Product.reorder_level)
+        .order_by(on_hand.asc())
+        .limit(ALERT_LIMIT)
     )
     if scope is not None:
         ls_stmt = ls_stmt.where(Stock.branch_id.in_(scope))
     low_stock = [
         {"product": n, "reorder_level": float(rl), "on_hand": float(q)}
-        for n, rl, q in db.execute(ls_stmt).all() if float(q) <= float(rl)
+        for n, rl, q in db.execute(ls_stmt).all()
     ]
 
     case_stmt = (
@@ -267,11 +278,21 @@ def alerts(
         }
         for c, pname, bname in db.execute(case_stmt).all()
     ]
+    # Count every open case, not just the 20 listed above.
+    open_case_stmt = select(func.count(StockDiscrepancy.id)).where(
+        StockDiscrepancy.organization_id == org_id,
+        StockDiscrepancy.status.in_(
+            (StockDiscrepancyStatus.open, StockDiscrepancyStatus.investigating)
+        ),
+    )
+    if scope is not None:
+        open_case_stmt = open_case_stmt.where(StockDiscrepancy.branch_id.in_(scope))
+
     return {
         "near_expiry": near_expiry,
         "low_stock": low_stock,
         "stock_cases": stock_cases,
-        "stock_case_open": len(stock_cases),
+        "stock_case_open": int(db.scalar(open_case_stmt) or 0),
     }
 
 

@@ -5,10 +5,12 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.accounting import JournalEntry, JournalLine, LedgerAccount
-from app.models.enums import AccountType
+from app.models.enums import AccountType, InvoiceStatus
+from app.models.sales import Invoice, InvoiceItem
+from app.models.vendor import Vendor
 
 # code -> (name, type)
 DEFAULT_ACCOUNTS: dict[str, tuple[str, AccountType]] = {
@@ -231,6 +233,57 @@ def daybook(db: Session, *, organization_id: int, start: date, end: date,
             ],
         })
     return out
+
+
+def gst_slabs(db: Session, *, organization_id: int, start: date, end: date,
+              branch_ids: list[int] | None = None) -> list[dict]:
+    """Outward supply taxable value and tax per GST rate, lowest rate first.
+
+    Shared by /accounting/gst-summary and the "GST summary" report so the two
+    can never report different numbers for the same period.
+    """
+    stmt = (
+        select(
+            InvoiceItem.gst_rate,
+            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
+            func.coalesce(func.sum(InvoiceItem.tax_amount), 0),
+        )
+        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+        .where(
+            Invoice.organization_id == organization_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.invoice_date >= start,
+            Invoice.invoice_date <= end,
+        )
+        .group_by(InvoiceItem.gst_rate)
+    )
+    if branch_ids is not None:
+        stmt = stmt.where(Invoice.branch_id.in_(branch_ids))
+
+    slabs = []
+    for rate, taxable, tax in db.execute(stmt).all():
+        tax_amount = round(float(tax or 0), 2)
+        slabs.append({
+            "gst_rate": round(float(rate or 0), 2),
+            "taxable_value": round(float(taxable or 0), 2),
+            # Intra-state supply splits the tax evenly between centre and state.
+            "cgst": round(tax_amount / 2, 2),
+            "sgst": round(tax_amount / 2, 2),
+            "total_tax": tax_amount,
+        })
+    slabs.sort(key=lambda r: r["gst_rate"])
+    return slabs
+
+
+def vendor_payables(db: Session, *, organization_id: int) -> list[Vendor]:
+    """Suppliers we still owe, largest balance first."""
+    return list(db.scalars(
+        select(Vendor).where(
+            Vendor.organization_id == organization_id,
+            Vendor.is_deleted.is_(False),
+            Vendor.outstanding_balance > 0,
+        ).order_by(Vendor.outstanding_balance.desc())
+    ).all())
 
 
 def profit_and_loss(db: Session, *, organization_id: int, start: date, end: date,

@@ -6,6 +6,7 @@ import { printDebitNote } from "../print";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchSelect, Table } from "../components/ui";
 import { PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
+import { useDebouncedValue } from "../hooks";
 import * as V from "../validate";
 
 function newLine(kind: "po" | "grn") {
@@ -45,20 +46,31 @@ export default function Purchasing() {
   const [revErr, setRevErr] = useState("");
   const [revBusy, setRevBusy] = useState(false);
 
-  const loadAll = async (vq?: string, oq?: string, gq?: string, rq?: string) => {
-    const [v, o, g, r] = await Promise.all([
-      api.vendors((vq !== undefined ? vq : vendorQ) || undefined),
-      api.purchaseOrders((oq !== undefined ? oq : orderQ) || undefined),
-      api.grns((gq !== undefined ? gq : grnQ) || undefined),
-      api.purchaseReturns((rq !== undefined ? rq : returnQ) || undefined),
-    ]);
+  const loadVendors = async (q = vendorQ) => {
+    const v = await api.vendors(q || undefined);
     setVendors([...v].sort((a, b) => Number(b.outstanding_balance || 0) - Number(a.outstanding_balance || 0) || String(a.name).localeCompare(String(b.name))));
-    setOrders(o); setGrns(g); setReturns(r);
   };
+  const loadOrders = async (q = orderQ) => setOrders(await api.purchaseOrders(q || undefined));
+  const loadGrns = async (q = grnQ) => setGrns(await api.grns(q || undefined));
+  const loadReturns = async (q = returnQ) => setReturns(await api.purchaseReturns(q || undefined));
+
+  const loadAll = () =>
+    Promise.all([loadVendors(), loadOrders(), loadGrns(), loadReturns()]);
+
   useEffect(() => {
     Promise.all([loadAll(), api.branches().then(setBranches)])
       .finally(() => setReady(true));
   }, []);
+
+  // Each tab refetches only its own list, and only once typing pauses.
+  const vendorQd = useDebouncedValue(vendorQ);
+  const orderQd = useDebouncedValue(orderQ);
+  const grnQd = useDebouncedValue(grnQ);
+  const returnQd = useDebouncedValue(returnQ);
+  useEffect(() => { if (ready) loadVendors(vendorQd).catch(() => {}); }, [vendorQd]);
+  useEffect(() => { if (ready) loadOrders(orderQd).catch(() => {}); }, [orderQd]);
+  useEffect(() => { if (ready) loadGrns(grnQd).catch(() => {}); }, [grnQd]);
+  useEffect(() => { if (ready) loadReturns(returnQd).catch(() => {}); }, [returnQd]);
 
   const searchProducts = (q: string) => {
     api.products(q || undefined, undefined, 40).then(setPickerProducts).catch(() => {});
@@ -254,7 +266,7 @@ export default function Purchasing() {
           <div className="row mb-16" style={{ position: "relative", maxWidth: 340 }}>
             <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
             <input placeholder="Search vendor, GSTIN or phone…" value={vendorQ} style={{ paddingLeft: 36 }}
-              onChange={(e) => { setVendorQ(e.target.value); loadAll(e.target.value); }} />
+              onChange={(e) => setVendorQ(e.target.value)} />
           </div>
           <Table
             columns={[
@@ -280,7 +292,7 @@ export default function Purchasing() {
           <div className="row mb-16" style={{ position: "relative", maxWidth: 340 }}>
             <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
             <input placeholder="Search PO # or vendor…" value={orderQ} style={{ paddingLeft: 36 }}
-              onChange={(e) => { setOrderQ(e.target.value); loadAll(undefined, e.target.value); }} />
+              onChange={(e) => setOrderQ(e.target.value)} />
           </div>
           <Table
             columns={[
@@ -300,7 +312,7 @@ export default function Purchasing() {
           <div className="row mb-16" style={{ position: "relative", maxWidth: 340 }}>
             <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
             <input placeholder="Search GRN #, vendor or invoice…" value={grnQ} style={{ paddingLeft: 36 }}
-              onChange={(e) => { setGrnQ(e.target.value); loadAll(undefined, undefined, e.target.value); }} />
+              onChange={(e) => setGrnQ(e.target.value)} />
           </div>
           <Table
             columns={[
@@ -334,7 +346,7 @@ export default function Purchasing() {
           <div className="row mb-16" style={{ position: "relative", maxWidth: 340 }}>
             <Search size={17} style={{ position: "absolute", left: 12, color: "#94a3b8" }} />
             <input placeholder="Search debit note, GRN or vendor…" value={returnQ} style={{ paddingLeft: 36 }}
-              onChange={(e) => { setReturnQ(e.target.value); loadAll(undefined, undefined, undefined, e.target.value); }} />
+              onChange={(e) => setReturnQ(e.target.value)} />
           </div>
           <Table
             columns={[

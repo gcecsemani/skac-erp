@@ -4,27 +4,32 @@ import { useAuth } from "../auth";
 
 const REMEMBER_KEY = "skac_remember_login";
 
-function loadRemembered() {
+/** Only the email is kept. The password belongs in the browser's own
+ *  password manager (see autoComplete below) — storing it in localStorage
+ *  left it readable in plain text by any script on the page. */
+function loadRememberedEmail(): string {
   try {
     const raw = localStorage.getItem(REMEMBER_KEY);
-    if (!raw) return { email: "", password: "", remember: false };
+    if (!raw) return "";
     const parsed = JSON.parse(raw);
-    return {
-      email: String(parsed.email || ""),
-      password: String(parsed.password || ""),
-      remember: true,
-    };
+    if (parsed.password) {
+      // Drop a password saved by an older build of the app.
+      localStorage.setItem(
+        REMEMBER_KEY, JSON.stringify({ email: String(parsed.email || "") }),
+      );
+    }
+    return String(parsed.email || "");
   } catch {
-    return { email: "", password: "", remember: false };
+    return "";
   }
 }
 
 export default function Login() {
   const { login } = useAuth();
-  const saved = loadRemembered();
-  const [email, setEmail] = useState(saved.email);
-  const [password, setPassword] = useState(saved.password);
-  const [remember, setRemember] = useState(saved.remember);
+  const savedEmail = loadRememberedEmail();
+  const [email, setEmail] = useState(savedEmail);
+  const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(Boolean(savedEmail));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -39,7 +44,7 @@ export default function Login() {
     setError(""); setBusy(true);
     try {
       await login(em, pw);
-      if (remember) localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: em, password: pw }));
+      if (remember) localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: em }));
       else localStorage.removeItem(REMEMBER_KEY);
     } catch (err: any) {
       setError(err.message || "Sign in failed. Check your email and password.");
@@ -78,7 +83,7 @@ export default function Login() {
           </div>
           <label className="row" style={{ gap: 8, cursor: "pointer", marginBottom: 14 }}>
             <input type="checkbox" style={{ width: "auto" }} checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-            Remember username and password
+            Remember my email on this device
           </label>
           {error && <div className="error">{error}</div>}
           <button className="btn btn-primary btn-block" type="submit" disabled={busy}>

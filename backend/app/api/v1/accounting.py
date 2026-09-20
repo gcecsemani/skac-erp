@@ -12,8 +12,7 @@ from app.core.database import get_db
 from app.core.deps import CurrentUser, require_permission
 from app.models.accounting import LedgerAccount
 from app.models.enums import InvoiceStatus
-from app.models.sales import Invoice, InvoiceItem
-from app.models.vendor import Vendor
+from app.models.sales import Invoice
 from app.services import accounting as acc
 
 router = APIRouter(prefix="/accounting", tags=["accounting"])
@@ -74,37 +73,17 @@ def gst_summary(
 ) -> dict:
     """GSTR-1/3B-ready outward supply summary grouped by GST rate."""
     s, e = _parse(start, end)
-    stmt = (
-        select(
-            InvoiceItem.gst_rate,
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.tax_amount), 0),
-        )
-        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-        .where(
-            Invoice.organization_id == current.organization_id,
-            Invoice.status == InvoiceStatus.finalized,
-            Invoice.invoice_date >= s, Invoice.invoice_date <= e,
-        )
-        .group_by(InvoiceItem.gst_rate)
+    slabs = acc.gst_slabs(
+        db, organization_id=current.organization_id, start=s, end=e,
+        branch_ids=_branch_scope(current),
     )
-    scope = _branch_scope(current)
-    if scope is not None:
-        stmt = stmt.where(Invoice.branch_id.in_(scope))
-    rows = db.execute(stmt).all()
-    slabs = []
-    total_taxable = total_tax = 0.0
-    for rate, taxable, tax in rows:
-        taxable, tax = float(taxable), float(tax)
-        total_taxable += taxable
-        total_tax += tax
-        slabs.append({
-            "gst_rate": float(rate), "taxable_value": round(taxable, 2),
-            "cgst": round(tax / 2, 2), "sgst": round(tax / 2, 2),
-            "total_tax": round(tax, 2),
-        })
-    return {"start": s.isoformat(), "end": e.isoformat(), "slabs": slabs,
-            "total_taxable": round(total_taxable, 2), "total_tax": round(total_tax, 2)}
+    return {
+        "start": s.isoformat(),
+        "end": e.isoformat(),
+        "slabs": slabs,
+        "total_taxable": round(sum(r["taxable_value"] for r in slabs), 2),
+        "total_tax": round(sum(r["total_tax"] for r in slabs), 2),
+    }
 
 
 @router.get("/receivables-aging")
@@ -147,10 +126,7 @@ def payables(
     current: CurrentUser = Depends(require_permission(rbac.P_ACCOUNTING_VIEW)),
     db: Session = Depends(get_db),
 ) -> dict:
-    rows = db.scalars(select(Vendor).where(
-        Vendor.organization_id == current.organization_id,
-        Vendor.outstanding_balance > 0,
-    ).order_by(Vendor.outstanding_balance.desc())).all()
+    rows = acc.vendor_payables(db, organization_id=current.organization_id)
     return {
         "vendors": [{"name": v.name, "outstanding": float(v.outstanding_balance)} for v in rows],
         "total": round(sum(float(v.outstanding_balance) for v in rows), 2),

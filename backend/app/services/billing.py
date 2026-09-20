@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.units import billed_to_stock_qty, is_loose_sale, loose_unit_price
@@ -17,6 +17,7 @@ from app.models.sales import Invoice, InvoiceItem
 from app.services import accounting, inventory
 
 TWOPLACES = Decimal("0.01")
+MAX_INVOICE_NO_PROBES = 50
 
 
 @dataclass
@@ -47,13 +48,36 @@ def _next_invoice_no(db: Session, branch: Branch) -> str:
     today = date.today()
     fy_start = today.year if today.month >= 4 else today.year - 1
     fy = f"{fy_start}-{str(fy_start + 1)[-2:]}"
-    count = db.scalar(
-        select(func.count(Invoice.id)).where(
-            Invoice.branch_id == branch.id,
-            Invoice.status == InvoiceStatus.finalized,
+    prefix = f"{branch.code}/{fy}/"
+
+    # Continue from the last number this branch issued. A COUNT(*) over the
+    # branch's whole history got slower with every sale and could hand the
+    # same number to two tills billing at once.
+    last = db.scalar(
+        select(Invoice.invoice_no)
+        .where(Invoice.branch_id == branch.id, Invoice.invoice_no.is_not(None))
+        .order_by(Invoice.id.desc())
+        .limit(1)
+    )
+    seq = 0
+    if last:
+        tail = last.rsplit("/", 1)[-1]
+        if tail.isdigit():
+            seq = int(tail)
+
+    # uq_invoice_branch_no is the real guard; skip numbers already taken so a
+    # concurrent till or a repaired gap does not fail the sale.
+    for _ in range(MAX_INVOICE_NO_PROBES):
+        seq += 1
+        candidate = f"{prefix}{seq:05d}"
+        taken = db.scalar(
+            select(Invoice.id)
+            .where(Invoice.branch_id == branch.id, Invoice.invoice_no == candidate)
+            .limit(1)
         )
-    ) or 0
-    return f"{branch.code}/{fy}/{count + 1:05d}"
+        if taken is None:
+            return candidate
+    raise ValueError("Could not assign an invoice number, please retry")
 
 
 def create_and_finalize(
@@ -101,8 +125,19 @@ def create_and_finalize(
     discount_total = Decimal("0")
     tax_total = Decimal("0")
 
-    for line in data.lines or []:
-        product = db.get(Product, line.product_id)
+    lines = list(data.lines or [])
+    product_ids = {line.product_id for line in lines}
+    products: dict[int, Product] = (
+        {
+            p.id: p
+            for p in db.scalars(select(Product).where(Product.id.in_(product_ids))).all()
+        }
+        if product_ids
+        else {}
+    )
+
+    for line in lines:
+        product = products.get(line.product_id)
         if product is None:
             raise ValueError(f"Product {line.product_id} not found")
 

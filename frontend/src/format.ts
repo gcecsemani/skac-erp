@@ -106,6 +106,13 @@ export function localISODate(d = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** Today in the shop's own timezone. Never use toISOString() — in IST it
+ *  reports yesterday between midnight and 05:30. */
+export const todayISO = () => localISODate();
+
+export const monthStartISO = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+
 export function saleUnit(p: any): string {
   return packInfo(p).saleUnit;
 }
@@ -184,4 +191,21 @@ export function formatPackStock(stock: number, info: PackInfo): string {
 export function loosePrice(packPrice: number, info: PackInfo): number {
   if (!info.packSize) return packPrice;
   return Math.round((packPrice / info.packSize + Number.EPSILON) * 100) / 100;
+}
+
+/** Compact “last billed” label for the POS farmer picker. */
+export function lastBillLabel(iso: string | null | undefined, now = new Date()): { text: string; days: number | null } {
+  if (!iso) return { text: "Never billed", days: null };
+  const [y, m, d] = String(iso).slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return { text: "Never billed", days: null };
+  const billed = new Date(y, m - 1, d);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((today.getTime() - billed.getTime()) / 86_400_000);
+  if (days <= 0) return { text: "Billed today", days: Math.max(days, 0) };
+  if (days === 1) return { text: "Yesterday", days };
+  if (days < 30) return { text: `${days}d ago`, days };
+  return {
+    text: billed.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }),
+    days,
+  };
 }

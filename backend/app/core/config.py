@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:5173"
 
+    # How far ahead a batch counts as "expiring soon". Shared by the dashboard
+    # alert list and the dashboard count so the two can't report different
+    # numbers for the same thing.
+    near_expiry_days: int = 30
+
     # AI
     ai_provider: str = "none"  # gemini | groq | none
     ai_api_key: str = ""

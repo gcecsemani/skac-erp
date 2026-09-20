@@ -9,6 +9,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.core import rbac
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_permission
 from app.models.customer import Customer
@@ -19,7 +20,7 @@ from app.models.organization import Branch
 from app.models.product import Product
 from app.models.sales import Invoice, InvoiceItem
 from app.models.vendor import Vendor
-from app.services.cogs import line_cogs_expr
+from app.services.cogs import line_totals_stmt, overall_totals
 from app.services.report_tables import run_report, visible_catalog
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -104,6 +105,24 @@ def _sum_range(daily: dict[date, dict], start: date, end: date, key: str = "sale
     return total, count
 
 
+def dashboard_gross_profit(db: Session, org_id: int, scope: list[int] | None, start: date, end: date) -> float:
+    """Taxable revenue − pack-equivalent COGS, same basis as the P&L report."""
+    stmt = (
+        line_totals_stmt()
+        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+        .join(Product, Product.id == InvoiceItem.product_id)
+        .where(
+            Invoice.organization_id == org_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.invoice_date >= start, Invoice.invoice_date <= end,
+        )
+    )
+    if scope is not None:
+        stmt = stmt.where(Invoice.branch_id.in_(scope))
+    totals = overall_totals(db, stmt)
+    return round(float(totals.taxable) - float(totals.cogs), 2)
+
+
 @router.get("/dashboard")
 def dashboard(
     branch_id: int | None = None,
@@ -155,23 +174,7 @@ def dashboard(
     sales_ytd, _ = _sum_range(daily, fy_start, today)
     trend = [{"date": label, "revenue": _sum_range(daily, a, b)[0]} for a, b, label in trend_points]
 
-    gp_stmt = (
-        select(
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(line_cogs_expr()), 0),
-        )
-        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-        .join(Product, Product.id == InvoiceItem.product_id)
-        .where(
-            Invoice.organization_id == org_id,
-            Invoice.status == InvoiceStatus.finalized,
-            Invoice.invoice_date >= period_start, Invoice.invoice_date <= period_end,
-        )
-    )
-    if scope is not None:
-        gp_stmt = gp_stmt.where(Invoice.branch_id.in_(scope))
-    rev, cost = db.execute(gp_stmt).one()
-    gross_profit = float(rev) - float(cost)
+    gross_profit = dashboard_gross_profit(db, org_id, scope, period_start, period_end)
 
     recv_stmt = select(
         func.coalesce(func.sum(Invoice.grand_total - Invoice.amount_paid), 0),
@@ -221,16 +224,19 @@ def dashboard(
         branch_stmt = branch_stmt.where(Branch.id.in_(scope))
     branch_comparison = [{"branch": name, "revenue": float(v or 0)} for name, v in db.execute(branch_stmt)]
 
-    near_expiry = db.scalar(
+    ne_stmt = (
         select(func.count(func.distinct(Batch.id)))
         .join(Stock, Stock.batch_id == Batch.id)
         .where(
             Batch.organization_id == org_id, Stock.quantity > 0,
             Batch.expiry_date.is_not(None),
-            Batch.expiry_date <= today + timedelta(days=30),
+            Batch.expiry_date <= today + timedelta(days=settings.near_expiry_days),
             Batch.expiry_date >= today,
         )
-    ) or 0
+    )
+    if scope is not None:
+        ne_stmt = ne_stmt.where(Stock.branch_id.in_(scope))
+    near_expiry = db.scalar(ne_stmt) or 0
 
     exp_cat_stmt = (
         select(

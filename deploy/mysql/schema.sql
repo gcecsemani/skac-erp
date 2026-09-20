@@ -757,6 +757,10 @@ CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_count_date ON stock_discrepancy 
 CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_status ON stock_discrepancy (status);
 CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_org_status ON stock_discrepancy (organization_id, status);
 CREATE INDEX IF NOT EXISTS ix_stock_discrepancy_org_product ON stock_discrepancy (organization_id, product_id, branch_id);
+CREATE INDEX IF NOT EXISTS ix_stock_movement_org_branch_prod_at ON stock_movement (organization_id, branch_id, product_id, occurred_at);
+CREATE INDEX IF NOT EXISTS ix_invoice_customer_status_date ON invoice (customer_id, status, invoice_date);
+CREATE INDEX IF NOT EXISTS ix_customer_org_outstanding ON customer (organization_id, outstanding_balance);
+CREATE INDEX IF NOT EXISTS ix_field_visit_org_date ON field_visit (organization_id, visit_date);
 
 CREATE TABLE IF NOT EXISTS config_item (
 	organization_id BIGINT NOT NULL,

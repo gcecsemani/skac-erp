@@ -14,7 +14,6 @@ type Catalog = "products" | "customers";
 
 let dbPromise: Promise<IDBPDatabase<SkacDB>> | null = null;
 const mem: Record<Catalog, any[] | null> = { products: null, customers: null };
-const listeners = new Set<() => void>();
 
 function db() {
   if (!dbPromise) {
@@ -29,18 +28,8 @@ function db() {
   return dbPromise;
 }
 
-function notify() {
-  listeners.forEach((fn) => fn());
-}
-
-export function subscribeCatalog(fn: () => void) {
-  listeners.add(fn);
-  return () => { listeners.delete(fn); };
-}
-
 async function replaceStore(store: Catalog, rows: any[]) {
   mem[store] = rows;
-  notify();
   const d = await db();
   const tx = d.transaction(store, "readwrite");
   await tx.store.clear();
@@ -75,13 +64,11 @@ export function upsertCached(store: Catalog, row: any) {
   const i = cur.findIndex((x) => x.id === row.id);
   const next = i >= 0 ? cur.map((x) => (x.id === row.id ? { ...x, ...row } : x)) : [...cur, row];
   mem[store] = next;
-  notify();
   db().then((d) => d.put(store, next.find((x) => x.id === row.id) || row)).catch(() => {});
 }
 
 export function removeCached(store: Catalog, id: number) {
   mem[store] = (mem[store] || []).filter((x) => x.id !== id);
-  notify();
   db().then((d) => d.delete(store, id)).catch(() => {});
 }
 
@@ -91,7 +78,6 @@ export async function clearCatalogs() {
   const d = await db();
   await d.clear("products");
   await d.clear("customers");
-  notify();
 }
 
 export function matchCustomer(c: any, q: string) {

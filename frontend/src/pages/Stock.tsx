@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { PackagePlus, Undo2 } from "lucide-react";
+import { PackagePlus, Pencil, Undo2 } from "lucide-react";
 import { api } from "../api";
-import { matchesQuery, num } from "../format";
+import { inr, matchesQuery, num } from "../format";
 import { Badge, BranchSelect, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
 import * as V from "../validate";
 
@@ -14,6 +14,10 @@ export default function Stock() {
   const [correctForm, setCorrectForm] = useState<any>({ quantity: "", reason: "", relocate: false, branch_id: "", product_id: "", batch_no: "" });
   const [correctErr, setCorrectErr] = useState("");
   const [correcting, setCorrecting] = useState(false);
+  const [costRow, setCostRow] = useState<any | null>(null);
+  const [costPrice, setCostPrice] = useState("");
+  const [costErr, setCostErr] = useState("");
+  const [costSaving, setCostSaving] = useState(false);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
   const [branchId, setBranchId] = useState(0);
@@ -81,14 +85,15 @@ export default function Stock() {
     <div>
       <PageHeader
         title="Stock on Hand"
-        subtitle="Batch & expiry-wise stock. Use Correct to undo a wrong receive (wrong shop or product)."
+        subtitle="Batch & expiry-wise stock. Edit cost to fix margin; use Correct to undo a wrong receive."
         actions={
           <div className="row">
             <ExportButtons title="Stock on hand" columns={[
               { key: "product", label: "Product" }, { key: "batch_no", label: "Batch" },
               { key: "expiry_date", label: "Expiry" }, { key: "quantity", label: "Qty", num: true },
+              { key: "purchase_price", label: "Cost", num: true, money: true },
             ]} rows={filtered} />
-            <button className="btn btn-primary" onClick={openReceive}><PackagePlus size={16} /> Receive Stock</button>
+            <button className="btn btn-primary" onClick={openReceive}><PackagePlus size={16} /> Add opening stock</button>
           </div>
         }
       />
@@ -112,18 +117,28 @@ export default function Stock() {
               return r.expiry_date ? <Badge tone={d! < 0 ? "danger" : d! <= 30 ? "warn" : "neutral"}>{r.expiry_date}</Badge> : "—";
             } },
             { key: "quantity", label: "Qty", num: true, render: (r) => <strong>{num(r.quantity)}</strong> },
+            { key: "purchase_price", label: "Cost / pack", num: true, render: (r) => inr(r.purchase_price) },
             { key: "actions", label: "", render: (r) => (
-              <button className="btn btn-ghost btn-sm" title="Correct wrong receive" onClick={() => {
-                setCorrectErr("");
-                setCorrect(r);
-                setCorrectForm({
-                  quantity: String(r.quantity), reason: "", relocate: false,
-                  branch_id: r.branch_id, product_id: "", batch_no: r.batch_no,
-                });
-                api.products(undefined, undefined, 80).then(setProducts).catch(() => {});
-              }}>
-                <Undo2 size={14} /> Correct
-              </button>
+              <div className="row" style={{ gap: 4, justifyContent: "flex-end" }}>
+                <button className="btn btn-ghost btn-sm" title="Edit batch cost" onClick={() => {
+                  setCostErr("");
+                  setCostRow(r);
+                  setCostPrice(r.purchase_price === 0 || r.purchase_price ? String(r.purchase_price) : "");
+                }}>
+                  <Pencil size={14} /> Cost
+                </button>
+                <button className="btn btn-ghost btn-sm" title="Correct wrong receive" onClick={() => {
+                  setCorrectErr("");
+                  setCorrect(r);
+                  setCorrectForm({
+                    quantity: String(r.quantity), reason: "", relocate: false,
+                    branch_id: r.branch_id, product_id: "", batch_no: r.batch_no,
+                  });
+                  api.products(undefined, undefined, 80).then(setProducts).catch(() => {});
+                }}>
+                  <Undo2 size={14} /> Correct
+                </button>
+              </div>
             ) },
           ]}
           rows={filtered}
@@ -133,9 +148,13 @@ export default function Stock() {
       </Card>
 
       {open && (
-        <Modal title="Receive Stock (GRN)" onClose={() => setOpen(false)}
-          footer={<><button className="btn btn-ghost" onClick={() => setOpen(false)}>Cancel</button><button className="btn btn-primary" onClick={submit}>Receive</button></>}>
+        <Modal title="Add opening / correction stock" onClose={() => setOpen(false)}
+          footer={<><button className="btn btn-ghost" onClick={() => setOpen(false)}>Cancel</button><button className="btn btn-primary" onClick={submit}>Add stock</button></>}>
           {err && <div className="error">{err}</div>}
+          <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+            For stock bought from a supplier, use <strong>Purchasing → Receive (GRN)</strong> instead.
+            That records the supplier bill and the amount you owe. This screen only moves stock.
+          </div>
           <div className="grid grid-2">
             <Field label="Branch" required><select value={form.branch_id} onChange={(e) => setForm({ ...form, branch_id: e.target.value })}>{branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</select></Field>
             <Field label="Product" required>
@@ -195,7 +214,7 @@ export default function Stock() {
             {correct.product} · batch {correct.batch_no} · {branches.find((b) => b.id === correct.branch_id)?.name || "branch"} · on hand <strong>{num(correct.quantity)}</strong>
           </p>
           <p className="muted" style={{ fontSize: 12 }}>
-            Stock loaded here with Receive Stock can be corrected. Qty that came from a GRN must be reversed with a purchase return on Purchasing.
+            Stock added here as opening / correction stock can be corrected. Qty that came from a GRN must be reversed with a purchase return on Purchasing.
           </p>
           <div className="grid grid-2">
             <Field label="Qty to reverse" required>
@@ -232,6 +251,37 @@ export default function Stock() {
               </Field>
             </div>
           )}
+        </Modal>
+      )}
+
+      {costRow && (
+        <Modal title="Edit batch cost" onClose={() => setCostRow(null)}
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setCostRow(null)} disabled={costSaving}>Cancel</button>
+            <button className="btn btn-primary" disabled={costSaving} onClick={async () => {
+              setCostErr("");
+              const msg = V.nonNegative(costPrice, "Purchase price");
+              if (msg) { setCostErr(msg); return; }
+              setCostSaving(true);
+              try {
+                await api.updateBatchCost(costRow.batch_id, Number(costPrice));
+                setCostRow(null); load();
+              } catch (e: any) { setCostErr(e.message); }
+              finally { setCostSaving(false); }
+            }}>{costSaving ? "Saving…" : "Save cost"}</button>
+          </>}>
+          {costErr && <div className="error">{costErr}</div>}
+          <p className="muted" style={{ marginTop: 0 }}>
+            {costRow.product}{costRow.sku ? ` · ${costRow.sku}` : ""} · batch {costRow.batch_no}
+          </p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            Product margin and P&L use this pack cost for every shop that holds this batch.
+            {costRow.product_purchase_price ? ` Product master cost is ${inr(costRow.product_purchase_price)}.` : ""}
+          </p>
+          <Field label="Cost per pack" required>
+            <input type="number" min={0} step="0.01" value={costPrice}
+              onChange={(e) => setCostPrice(e.target.value)} />
+          </Field>
         </Modal>
       )}
     </div>

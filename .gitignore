@@ -49,6 +49,14 @@ pnpm-debug.log*
 *.local
 *.pid
 
+# Database dumps and spreadsheets kept at the repo root while migrating.
+# These run to hundreds of MB — never commit them.
+/Dump*.sql
+/*.sql
+/*.xlsx
+/*.xls
+/*.csv
+
 # Local uploads (field visit photos)
 backend/uploads/
 uploads/

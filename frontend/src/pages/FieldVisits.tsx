@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { Check, Eye, MapPin, Plus, Trash2, X } from "lucide-react";
 import { api } from "../api";
+import { lastBillLabel } from "../format";
 import { useAuth } from "../auth";
 import { isOwner } from "../roles";
+import { useDebouncedValue } from "../hooks";
 import { Badge, BranchSelect, Card, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
 import * as V from "../validate";
 
@@ -47,18 +49,21 @@ export default function FieldVisits() {
   const [gpsBusy, setGpsBusy] = useState(false);
   const [form, setForm] = useState<any>({});
 
-  const load = () => {
+  const load = (search = q) => {
     api.fieldVisits({
       status: status || undefined,
       branchId: branchId || undefined,
-      search: q.trim() || undefined,
+      search: search.trim() || undefined,
     }).then(setRows).catch(() => setRows([]));
   };
   useEffect(() => {
     api.branches().then((b) => { setBranches(b); }).catch(() => {});
     api.fieldVisitStaff().then(setStaff).catch(() => setStaff([]));
   }, []);
-  useEffect(() => { load(); }, [status, branchId, q]);
+  // Debounced so filtering by farmer/phone/village does not hit the API on
+  // every keystroke.
+  const qd = useDebouncedValue(q);
+  useEffect(() => { load(qd); }, [status, branchId, qd]);
 
   const searchFarmers = (needle: string) => {
     api.customers(needle || undefined, 40).then(setFarmers).catch(() => {});
@@ -283,7 +288,7 @@ export default function FieldVisits() {
                 onQuery={searchFarmers}
                 allowEmpty
                 emptyLabel="New farmer (type name below)"
-                getLabel={(c) => `${c.name}${c.phone ? ` · ${c.phone}` : ""}${c.village ? ` · ${c.village}` : ""}`}
+                getLabel={(c) => `${c.name}${c.phone ? ` · ${c.phone}` : ""}${c.village ? ` · ${c.village}` : ""} · ${lastBillLabel(c.last_bill_date).text}`}
               />
             </Field>
             <Field label="Farmer name" required>

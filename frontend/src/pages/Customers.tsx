@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen, Undo2 } from "lucide-react";
 import { api } from "../api";
-import { inr } from "../format";
+import { inr, lastBillLabel } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
@@ -114,6 +114,7 @@ export default function Customers() {
               { key: "name", label: "Name" }, { key: "phone", label: "Phone" },
               { key: "village", label: "Village" }, { key: "district", label: "District" },
               { key: "outstanding_balance", label: "Outstanding", num: true, money: true },
+              { key: "last_bill_date", label: "Last bill" },
             ]} rows={rows || []} />
             <button className="btn btn-primary" onClick={openCreate}><Plus size={16} /> Add Farmer</button>
           </div>
@@ -139,6 +140,10 @@ export default function Customers() {
             { key: "district", label: "District" },
             { key: "credit_allowed", label: "Credit", render: (r) => r.credit_allowed ? <Badge tone="info">Allowed · {inr(r.credit_limit)}</Badge> : <Badge>Cash only</Badge> },
             { key: "outstanding_balance", label: "Outstanding", num: true, render: (r) => <strong style={{ color: r.outstanding_balance > 0 ? "var(--danger)" : "inherit" }}>{inr(r.outstanding_balance)}</strong> },
+            { key: "last_bill_date", label: "Last bill", render: (r) => {
+              const last = lastBillLabel(r.last_bill_date);
+              return <span className={last.days == null || last.days > 90 ? "muted" : undefined}>{last.text}</span>;
+            } },
             { key: "actions", label: "", render: (r) => (
               <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
                 <button className="icon-btn" style={{ width: 30, height: 30 }} title="Ledger / payment history" onClick={async () => {

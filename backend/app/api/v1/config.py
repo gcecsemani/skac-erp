@@ -92,12 +92,24 @@ def _get(db: Session, org_id: int, item_id: int) -> ConfigItem:
     return item
 
 
+# Masters (districts, villages, GST slabs, units...) change a few times a
+# year but every form loads them. Cache per org and drop it on any write.
+_bundle_cache: dict[int, dict] = {}
+
+
+def _invalidate_bundle(org_id: int) -> None:
+    _bundle_cache.pop(org_id, None)
+
+
 @router.get("/bundle")
 def config_bundle(
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     org_id = current.organization_id
+    cached = _bundle_cache.get(org_id)
+    if cached is not None:
+        return cached
     items = list(db.scalars(
         select(ConfigItem).where(
             ConfigItem.organization_id == org_id,
@@ -119,7 +131,7 @@ def config_bundle(
     for d in by_kind.get(KIND_DISTRICT, []):
         districts.append({**d, "villages": district_villages.get(d["id"], [])})
     expense_rows = by_kind.get(KIND_EXPENSE, [])
-    return {
+    bundle = {
         "districts": districts,
         "units": by_kind.get(KIND_UNIT, []),
         "gst_rates": by_kind.get(KIND_GST, []),
@@ -137,6 +149,8 @@ def config_bundle(
         "payment_modes": by_kind.get(KIND_PAYMENT, []),
         "states": by_kind.get(KIND_STATE, []),
     }
+    _bundle_cache[org_id] = bundle
+    return bundle
 
 
 @router.get("/items")
@@ -210,6 +224,7 @@ def create_item(
         actor_user_id=current.id, organization_id=current.organization_id,
         changes={"kind": kind, "name": item.name},
     )
+    _invalidate_bundle(current.organization_id)
     db.commit()
     db.refresh(item)
     return _row(item)
@@ -244,6 +259,7 @@ def update_item(
         actor_user_id=current.id, organization_id=current.organization_id,
         changes=payload.model_dump(mode="json", exclude_none=True),
     )
+    _invalidate_bundle(current.organization_id)
     db.commit()
     db.refresh(item)
     return _row(item)
@@ -271,5 +287,6 @@ def delete_item(
         actor_user_id=current.id, organization_id=current.organization_id,
         changes={"kind": item.kind, "name": item.name},
     )
+    _invalidate_bundle(current.organization_id)
     db.commit()
     return {"status": "deleted", "id": item_id}

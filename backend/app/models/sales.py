@@ -31,6 +31,12 @@ class Invoice(Base, PKMixin, TimestampMixin):
         UniqueConstraint("branch_id", "invoice_no", name="uq_invoice_branch_no"),
         Index("ix_invoice_org_status_date", "organization_id", "status", "invoice_date"),
         Index("ix_invoice_org_date_id", "organization_id", "invoice_date", "id"),
+        # Khata receipt allocation and day-close branch inference walk a
+        # farmer's finalized bills in date order.
+        Index(
+            "ix_invoice_customer_status_date",
+            "customer_id", "status", "invoice_date",
+        ),
     )
 
     organization_id: Mapped[int] = mapped_column(

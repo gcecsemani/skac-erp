@@ -1,19 +1,13 @@
 import { useEffect, useState } from "react";
 import { Plus, ReceiptIndianRupee } from "lucide-react";
 import { api } from "../api";
-import { inr, matchesQuery } from "../format";
+import { inr, matchesQuery, monthStartISO, todayISO } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, Table, BranchSelect } from "../components/ui";
 import { PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
 import { useAuth } from "../auth";
 import { seesAllBranches } from "../roles";
 import * as V from "../validate";
-
-const monthStart = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
-};
-const today = () => new Date().toISOString().slice(0, 10);
 
 export default function Expenses() {
   const { user } = useAuth();
@@ -24,8 +18,8 @@ export default function Expenses() {
   const [cats, setCats] = useState<any[]>([]);
   const [branchId, setBranchId] = useState(0);
   const [category, setCategory] = useState("");
-  const [start, setStart] = useState(monthStart);
-  const [end, setEnd] = useState(today);
+  const [start, setStart] = useState(monthStartISO);
+  const [end, setEnd] = useState(todayISO);
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [form, setForm] = useState<any>({});
@@ -61,7 +55,7 @@ export default function Expenses() {
     try {
       await api.createExpense({
         branch_id: Number(form.branch_id),
-        expense_date: form.expense_date || today(),
+        expense_date: form.expense_date || todayISO(),
         category: form.category,
         payee: form.payee,
         amount: Number(form.amount),
@@ -88,7 +82,7 @@ export default function Expenses() {
               { key: "category", label: "Category" }, { key: "payee", label: "Payee" },
               { key: "amount", label: "Amount", num: true, money: true },
             ]} rows={rows || []} />
-            <button className="btn btn-primary" onClick={() => { setErr(""); setForm({ branch_id: branches[0]?.id, category: "transport", mode: "cash", expense_date: today() }); setOpen(true); }}><Plus size={16} /> Record Expense</button>
+            <button className="btn btn-primary" onClick={() => { setErr(""); setForm({ branch_id: branches[0]?.id, category: "transport", mode: "cash", expense_date: todayISO() }); setOpen(true); }}><Plus size={16} /> Record Expense</button>
           </div>
         }
       />
@@ -130,7 +124,7 @@ export default function Expenses() {
                 {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
             </Field>
-            <Field label="Date" required><input type="date" value={form.expense_date || today()} onChange={(e) => setForm({ ...form, expense_date: e.target.value })} /></Field>
+            <Field label="Date" required><input type="date" value={form.expense_date || todayISO()} onChange={(e) => setForm({ ...form, expense_date: e.target.value })} /></Field>
             <Field label="Category">
               <select value={form.category || "transport"} onChange={(e) => setForm({ ...form, category: e.target.value })}>
                 {cats.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}

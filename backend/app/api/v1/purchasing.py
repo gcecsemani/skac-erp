@@ -427,13 +427,36 @@ def create_grn(
     db.add(grn)
     db.flush()
 
+    # Resolve every line's product and existing batch up front; a large GRN
+    # was otherwise doing three round-trips per line.
+    products = _products_by_id(db, (it.product_id for it in payload.items))
+    line_product_ids = {it.product_id for it in payload.items}
+    existing_batches: dict[tuple[int, str], Batch] = {
+        (b.product_id, b.batch_no): b
+        for b in db.scalars(
+            select(Batch).where(
+                Batch.product_id.in_(line_product_ids),
+                Batch.batch_no.in_({it.batch_no for it in payload.items}),
+            )
+        ).all()
+    }
+    po_items_by_product: dict[int, PurchaseOrderItem] = {}
+    if payload.purchase_order_id:
+        po_items_by_product = {
+            pi.product_id: pi
+            for pi in db.scalars(
+                select(PurchaseOrderItem).where(
+                    PurchaseOrderItem.order_id == payload.purchase_order_id
+                )
+            ).all()
+        }
+
     total = Decimal("0")
     for it in payload.items:
-        product = db.get(Product, it.product_id)
+        product = products.get(it.product_id)
         if product is None:
             raise HTTPException(status_code=400, detail=f"Product {it.product_id} not found")
-        batch = db.scalar(select(Batch).where(
-            Batch.product_id == it.product_id, Batch.batch_no == it.batch_no))
+        batch = existing_batches.get((it.product_id, it.batch_no))
         if batch is None:
             batch = Batch(
                 organization_id=current.organization_id, product_id=it.product_id,
@@ -442,6 +465,7 @@ def create_grn(
             )
             db.add(batch)
             db.flush()
+            existing_batches[(it.product_id, it.batch_no)] = batch
         inv.receive_stock(
             db, organization_id=current.organization_id, branch_id=payload.branch_id,
             product_id=it.product_id, batch_id=batch.id, quantity=it.quantity,
@@ -455,12 +479,9 @@ def create_grn(
         total += it.quantity * it.unit_price
 
         # Update matching PO line received quantity.
-        if payload.purchase_order_id:
-            po_item = db.scalar(select(PurchaseOrderItem).where(
-                PurchaseOrderItem.order_id == payload.purchase_order_id,
-                PurchaseOrderItem.product_id == it.product_id))
-            if po_item:
-                po_item.received_quantity = po_item.received_quantity + it.quantity
+        po_item = po_items_by_product.get(it.product_id)
+        if po_item is not None:
+            po_item.received_quantity = po_item.received_quantity + it.quantity
 
     grn.total_value = total
     count = db.scalar(select(func.count(GRN.id)).where(
@@ -526,6 +547,15 @@ def list_grn(
     return out
 
 
+def _products_by_id(db: Session, product_ids) -> dict[int, Product]:
+    ids = {pid for pid in product_ids if pid}
+    if not ids:
+        return {}
+    return {
+        p.id: p for p in db.scalars(select(Product).where(Product.id.in_(ids))).all()
+    }
+
+
 def _returned_qty_by_grn_item(db: Session, grn_id: int) -> dict[int, Decimal]:
     rows = db.execute(
         select(
@@ -542,17 +572,30 @@ def _returned_qty_by_grn_item(db: Session, grn_id: int) -> dict[int, Decimal]:
 def _serialize_grn(db: Session, g: GRN) -> dict:
     vendor = db.get(Vendor, g.vendor_id)
     returned = _returned_qty_by_grn_item(db, g.id)
+
+    # One query each for the line products and their on-hand rows, instead of
+    # two per line.
+    products = _products_by_id(db, (it.product_id for it in g.items))
+    batch_ids = {it.batch_id for it in g.items if it.batch_id}
+    on_hand_by_batch: dict[int, Decimal] = (
+        {
+            s.batch_id: s.quantity
+            for s in db.scalars(
+                select(Stock).where(
+                    Stock.branch_id == g.branch_id, Stock.batch_id.in_(batch_ids)
+                )
+            ).all()
+        }
+        if batch_ids
+        else {}
+    )
+
     items = []
     for it in g.items:
-        product = db.get(Product, it.product_id)
+        product = products.get(it.product_id)
         already = returned.get(it.id, Decimal("0"))
         remaining = it.quantity - already
-        on_hand = Decimal("0")
-        if it.batch_id:
-            stock = db.scalar(select(Stock).where(
-                Stock.branch_id == g.branch_id, Stock.batch_id == it.batch_id))
-            if stock is not None:
-                on_hand = stock.quantity
+        on_hand = on_hand_by_batch.get(it.batch_id, Decimal("0")) if it.batch_id else Decimal("0")
         returnable = remaining if remaining < on_hand else on_hand
         if returnable < 0:
             returnable = Decimal("0")
@@ -589,7 +632,9 @@ def get_grn(
     grn_id: int,
     current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db),
 ) -> dict:
-    grn = db.get(GRN, grn_id)
+    grn = db.scalar(
+        select(GRN).options(selectinload(GRN.items)).where(GRN.id == grn_id)
+    )
     if grn is None or grn.organization_id != current.organization_id:
         raise HTTPException(status_code=404, detail="GRN not found")
     current.assert_branch_access(grn.branch_id)
@@ -607,6 +652,17 @@ def _serialize_purchase_return(db: Session, note: PurchaseReturn) -> dict:
     vendor_state = _gstin_state(vendor_gstin, our_state)
     tax_type = "inter" if our_state and vendor_state and our_state != vendor_state else "intra"
     taxable_total = tax_total = Decimal("0")
+    grn_item_ids = {i.grn_item_id for i in note.items if i.grn_item_id}
+    grn_items: dict[int, GRNItem] = (
+        {
+            gi.id: gi
+            for gi in db.scalars(
+                select(GRNItem).where(GRNItem.id.in_(grn_item_ids))
+            ).all()
+        }
+        if grn_item_ids
+        else {}
+    )
     items = []
     for i in note.items:
         gst_rate = i.gst_rate or Decimal("0")
@@ -618,7 +674,7 @@ def _serialize_purchase_return(db: Session, note: PurchaseReturn) -> dict:
             tax = Decimal("0")
         taxable_total += Decimal(taxable)
         tax_total += Decimal(tax)
-        grn_item = db.get(GRNItem, i.grn_item_id) if i.grn_item_id else None
+        grn_item = grn_items.get(i.grn_item_id) if i.grn_item_id else None
         items.append({
             "grn_item_id": i.grn_item_id,
             "product_id": i.product_id,
@@ -690,7 +746,15 @@ def list_purchase_returns(
             Vendor.name.ilike(like),
             GRN.grn_no.ilike(like),
         ))
-    rows = db.scalars(stmt.order_by(PurchaseReturn.id.desc()).limit(limit)).unique().all()
+    rows = (
+        db.scalars(
+            stmt.options(selectinload(PurchaseReturn.items))
+            .order_by(PurchaseReturn.id.desc())
+            .limit(limit)
+        )
+        .unique()
+        .all()
+    )
     return [_serialize_purchase_return(db, r) for r in rows]
 
 
@@ -927,9 +991,18 @@ def list_payments(
     if vendor_id is not None:
         stmt = stmt.where(VendorPayment.vendor_id == vendor_id)
     rows = db.scalars(stmt.order_by(VendorPayment.id.desc()).limit(limit)).all()
+    vendor_ids = {p.vendor_id for p in rows}
+    vendors: dict[int, Vendor] = (
+        {
+            v.id: v
+            for v in db.scalars(select(Vendor).where(Vendor.id.in_(vendor_ids))).all()
+        }
+        if vendor_ids
+        else {}
+    )
     out = []
     for p in rows:
-        vendor = db.get(Vendor, p.vendor_id)
+        vendor = vendors.get(p.vendor_id)
         out.append({
             "id": p.id,
             "vendor_id": p.vendor_id,

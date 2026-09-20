@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, Trash2, Wifi, WifiOff, RefreshCw, CreditCard, CheckCircle2, User, X, UserPlus, Star, Printer } from "lucide-react";
+import { Search, Trash2, Wifi, WifiOff, RefreshCw, CreditCard, CheckCircle2, User, X, UserPlus, Star, Printer, History } from "lucide-react";
 import { api } from "../api";
-import { CATEGORY_COLORS, billedToStock, formatPackStock, inr, loosePrice, packInfo, saleUnit } from "../format";
+import { CATEGORY_COLORS, billedToStock, formatPackStock, inr, lastBillLabel, loosePrice, num, packInfo, saleUnit } from "../format";
 import { printThermalReceipt } from "../print";
 import { Card, PageHeader, Badge, Modal, Field, Switch } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
@@ -47,6 +47,8 @@ export default function POS() {
   const [billDiscount, setBillDiscount] = useState("");
   const [amountPaid, setAmountPaid] = useState("0");
   const [lastInv, setLastInv] = useState<any | null>(null);
+  const [bills, setBills] = useState<any[] | null>(null);
+  const [billsBusy, setBillsBusy] = useState(false);
   const [openPrint, setOpenPrint] = useState(getOpenPrintDialog);
   const branchIdRef = useRef(0);
   const loadSeq = useRef(0);
@@ -277,6 +279,17 @@ export default function POS() {
     return { lines: priced, gross, discountTotal, billDisc, sub, tax, grand: r2(sub + tax) };
   }, [lines, billDiscount, discMode]);
 
+  // The cart re-renders on every keystroke; index these so each row is a
+  // lookup instead of a scan over the whole catalogue.
+  const productById = useMemo(
+    () => new Map<number, any>(products.map((p) => [p.id, p])),
+    [products],
+  );
+  const pricedByKey = useMemo(
+    () => new Map<string, any>(totals.lines.map((l: any) => [l.key, l])),
+    [totals],
+  );
+
   useEffect(() => {
     if (payment === "credit") setAmountPaid("0");
     else setAmountPaid(String(totals.grand));
@@ -289,6 +302,19 @@ export default function POS() {
 
   const selectCustomer = (c: any | null) => {
     setCustomer(c); setCustQuery(c ? c.name : ""); setCustOpen(false);
+    if (!c) setBills(null);
+  };
+
+  const openBills = async () => {
+    if (!customer) return;
+    setBillsBusy(true);
+    try {
+      setBills(await api.customerBills(customer.id, 12));
+    } catch (e: any) {
+      setMsg({ text: e.message || "Could not load previous bills.", ok: false });
+    } finally {
+      setBillsBusy(false);
+    }
   };
 
   const createFarmer = async () => {
@@ -378,10 +404,16 @@ export default function POS() {
         upsertCached("products", next);
         return next;
       }));
-      if (customer && due > 0) {
-        const next = { ...customer, outstanding_balance: Number(customer.outstanding_balance || 0) + due };
+      if (customer) {
+        const t = new Date();
+        const today = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+        const next = {
+          ...customer,
+          last_bill_date: today,
+          outstanding_balance: due > 0 ? Number(customer.outstanding_balance || 0) + due : customer.outstanding_balance,
+        };
         upsertCached("customers", next);
-        setFarmerBook((cur) => cur.map((x) => x.id === next.id ? next : x));
+        setFarmerBook((cur) => [next, ...cur.filter((x) => x.id !== next.id)]);
       }
       loadProducts(branchId);
     } catch (e: any) { setMsg({ text: e.message, ok: false }); }
@@ -482,12 +514,12 @@ export default function POS() {
         <Card title="Current Bill" icon={<CreditCard size={16} />}>
           <div className="table-wrap" style={{ marginBottom: 12 }}>
             <table>
-              <thead><tr><th>Item</th><th>Unit</th><th className="num">Qty</th><th className="num">Price</th><th className="num">Disc ₹</th><th className="num">Total</th><th></th></tr></thead>
+              <thead><tr><th>Item</th><th>Unit</th><th className="num">Qty</th><th className="num">Rate</th><th className="num">Disc ₹</th><th className="num">Total</th><th></th></tr></thead>
               <tbody>
                 {lines.length === 0 && <tr><td colSpan={7} className="muted" style={{ textAlign: "center", padding: 24 }}>Tap products to add a bag, or +kg for loose</td></tr>}
                 {lines.map((l) => {
-                  const priced = totals.lines.find((x) => x.key === l.key);
-                  const p = products.find((x) => x.id === l.product_id);
+                  const priced = pricedByKey.get(l.key);
+                  const p = productById.get(l.product_id);
                   const info = packInfo(p || { name: l.name, sale_unit: l.unit });
                   const loose = info.allowsLoose && l.unit === info.looseUnit;
                   return (
@@ -502,7 +534,12 @@ export default function POS() {
                         ) : l.unit}
                       </td>
                       <td className="num"><input type="number" min={loose ? 0.01 : 0.001} step={loose ? 0.01 : 1} value={l.quantity} onChange={(e) => setQty(l.key, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
-                      <td className="num">{inr(l.unit_price)}</td>
+                      <td className="num">
+                        {inr(l.unit_price)}
+                        {priced && priced.discount > 0 && l.quantity > 0 && (
+                          <div className="muted" style={{ fontSize: 11 }}>net {inr(priced.taxable / l.quantity)}</div>
+                        )}
+                      </td>
                       <td className="num"><input type="number" min={0} step="0.01" value={l.discount || ""} placeholder="0" onChange={(e) => setLineDisc(l.key, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
                       <td className="num">{inr(priced?.lineTotal ?? l.quantity * l.unit_price)}</td>
                       <td><button className="icon-btn" style={{ width: 30, height: 30 }} onClick={() => remove(l.key)}><Trash2 size={14} /></button></td>
@@ -523,7 +560,14 @@ export default function POS() {
               <input type="number" min={0} step="0.01" value={billDiscount} placeholder="0" onChange={(e) => setBillDiscount(e.target.value)} style={{ width: 88, padding: 6, textAlign: "right" }} />
             </span>
           </div>
-          {totals.discountTotal > 0 && <div className="totals-row"><span>Total discount</span><span>− {inr(totals.discountTotal)}</span></div>}
+          {totals.discountTotal > 0 && (
+            <>
+              <div className="totals-row"><span>Total discount</span><span>− {inr(totals.discountTotal)}</span></div>
+              <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+                Discount does not change the product rate. Margin reports use net sales after discount.
+              </p>
+            </>
+          )}
           <div className="totals-row"><span>Taxable</span><span>{inr(totals.sub)}</span></div>
           <div className="totals-row"><span>GST</span><span>{inr(totals.tax)}</span></div>
           <div className="totals-grand"><span>Total</span><span>{inr(totals.grand)}</span></div>
@@ -532,13 +576,26 @@ export default function POS() {
             <label>Farmer {due > 0 ? "(required — unpaid balance goes to khata)" : "(optional — walk-in if empty)"}</label>
             {customer ? (
               <div className="row" style={{ justifyContent: "space-between", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "8px 10px" }}>
-                <span className="row" style={{ gap: 8 }}>
+                <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                   <User size={15} color="var(--brand-600)" />
                   <span style={{ fontWeight: 600 }}>{customer.name}</span>
                   {customer.village && <span className="muted" style={{ fontSize: 12 }}>· {customer.village}</span>}
+                  {(() => {
+                    const last = lastBillLabel(customer.last_bill_date);
+                    return (
+                      <Badge tone={last.days == null ? "neutral" : last.days > 90 ? "warn" : "info"}>
+                        {last.text}
+                      </Badge>
+                    );
+                  })()}
                   {customer.credit_allowed && <Badge tone="info">Khata: {inr(customer.outstanding_balance)}</Badge>}
                 </span>
-                <button className="icon-btn" style={{ width: 30, height: 30 }} onClick={() => selectCustomer(null)}><X size={14} /></button>
+                <span className="row" style={{ gap: 6 }}>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={openBills} disabled={billsBusy} title="Previous bills and items">
+                    <History size={14} /> {billsBusy ? "…" : "Bills"}
+                  </button>
+                  <button className="icon-btn" style={{ width: 30, height: 30 }} onClick={() => selectCustomer(null)}><X size={14} /></button>
+                </span>
               </div>
             ) : (
               <div ref={farmerBox} style={{ position: "relative" }}>
@@ -560,6 +617,9 @@ export default function POS() {
                         <span>
                           <strong>{c.name}</strong>{" "}
                           <span className="muted" style={{ fontSize: 12 }}>{c.phone || ""}{c.aadhaar_no ? ` · ${c.aadhaar_no}` : ""}</span>
+                          <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+                            {[c.village, lastBillLabel(c.last_bill_date).text].filter(Boolean).join(" · ")}
+                          </div>
                         </span>
                         {c.credit_allowed && <Badge tone="info">Khata {inr(c.outstanding_balance)}</Badge>}
                       </button>
@@ -648,6 +708,60 @@ export default function POS() {
             <input type="checkbox" style={{ width: "auto" }} checked={addFarmer.credit_allowed} onChange={(e) => setAddFarmer({ ...addFarmer, credit_allowed: e.target.checked })} />
             Allow credit (khata) account
           </label>
+        </Modal>
+      )}
+
+      {bills && customer && (
+        <Modal title={`Previous bills — ${customer.name}`} onClose={() => setBills(null)} wide
+          footer={<button className="btn btn-ghost" onClick={() => setBills(null)}>Close</button>}>
+          {customer.village && <p className="muted" style={{ marginTop: 0 }}>{customer.village}{customer.phone ? ` · ${customer.phone}` : ""}</p>}
+          {bills.length === 0 && (
+            <p className="muted">No invoices in this ERP for this farmer. Opening khata can still show outstanding.</p>
+          )}
+          {bills.map((inv) => {
+            const due = Math.max(0, Number(inv.grand_total) - Number(inv.amount_paid));
+            return (
+              <div key={inv.id} style={{ borderTop: "1px solid var(--border)", padding: "12px 0" }}>
+                <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <span>
+                    <strong>{inv.invoice_no || `#${inv.id}`}</strong>
+                    <span className="muted" style={{ marginLeft: 8 }}>{inv.date} · {String(inv.payment_mode || "").replace("_", " ")}</span>
+                  </span>
+                  <span>
+                    {inr(inv.grand_total)}
+                    {due > 0 ? <span className="muted"> · due {inr(due)}</span> : <span className="muted"> · paid</span>}
+                  </span>
+                </div>
+                <div className="table-wrap" style={{ marginTop: 8 }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Item</th>
+                        <th>Unit</th>
+                        <th className="num">Qty</th>
+                        <th className="num">Rate</th>
+                        <th className="num">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(inv.items || []).map((it: any, i: number) => (
+                        <tr key={`${inv.id}-${i}`}>
+                          <td>{it.product_name}{Number(it.discount) > 0 ? <span className="muted"> · disc {inr(it.discount)}</span> : null}</td>
+                          <td>{it.unit}</td>
+                          <td className="num">{num(it.quantity)}</td>
+                          <td className="num">{inr(it.unit_price)}</td>
+                          <td className="num">{inr(it.line_total)}</td>
+                        </tr>
+                      ))}
+                      {!(inv.items || []).length && (
+                        <tr><td colSpan={5} className="muted">No line items stored on this bill</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
         </Modal>
       )}
     </div>

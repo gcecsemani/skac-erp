@@ -26,6 +26,9 @@ DEFAULT_TARGET_COVERAGE_DAYS = 30
 class Forecast:
     product_id: int
     product_name: str
+    # Last known cost, so a recommendation can be turned into a priced PO
+    # without a second round-trip per line.
+    purchase_price: float
     current_stock: float
     avg_daily_sales: float
     weekly_sales: float
@@ -69,6 +72,64 @@ def _current_stock(
     return Decimal(db.scalar(stmt) or 0)
 
 
+def build_forecast(
+    *,
+    product_id: int,
+    product_name: str,
+    purchase_price: Decimal | float | None,
+    sold_in_window: Decimal,
+    sold_last_30: Decimal,
+    sold_prev_30: Decimal,
+    current_stock: Decimal,
+    window_days: int = 90,
+    lead_time_days: int = DEFAULT_LEAD_TIME_DAYS,
+    safety_days: int = DEFAULT_SAFETY_DAYS,
+    target_coverage_days: int = DEFAULT_TARGET_COVERAGE_DAYS,
+) -> Forecast:
+    """The forecast maths, given quantities already read from the ledger.
+
+    Single-product and whole-catalogue forecasting differ only in how they
+    fetch those quantities, so the arithmetic lives here once.
+    """
+    avg_daily = (sold_in_window / Decimal(window_days)) if window_days else Decimal("0")
+
+    # Trend: last 30 days vs the 30 days before that.
+    if sold_prev_30 > 0:
+        trend_pct = float((sold_last_30 - sold_prev_30) / sold_prev_30 * 100)
+    elif sold_last_30 > 0:
+        trend_pct = 100.0
+    else:
+        trend_pct = 0.0
+    trend = "rising" if trend_pct > 10 else "falling" if trend_pct < -10 else "stable"
+
+    reorder_point = avg_daily * Decimal(lead_time_days + safety_days)
+
+    stockout_date: str | None = None
+    if avg_daily > 0:
+        days_left = int(current_stock / avg_daily)
+        stockout_date = (date.today() + timedelta(days=days_left)).isoformat()
+
+    target_qty = avg_daily * Decimal(target_coverage_days)
+    recommended = target_qty + reorder_point - current_stock
+    if recommended < 0:
+        recommended = Decimal("0")
+
+    return Forecast(
+        product_id=product_id,
+        product_name=product_name,
+        purchase_price=round(float(purchase_price or 0), 2),
+        current_stock=float(current_stock),
+        avg_daily_sales=round(float(avg_daily), 3),
+        weekly_sales=round(float(avg_daily * 7), 2),
+        monthly_sales=round(float(avg_daily * 30), 2),
+        trend=trend,
+        trend_pct=round(trend_pct, 1),
+        reorder_point=round(float(reorder_point), 2),
+        estimated_stockout_date=stockout_date,
+        recommended_purchase_qty=round(float(recommended), 2),
+    )
+
+
 def forecast_product(
     db: Session,
     *,
@@ -81,60 +142,29 @@ def forecast_product(
     target_coverage_days: int = DEFAULT_TARGET_COVERAGE_DAYS,
 ) -> Forecast:
     now = datetime.utcnow()
-    since = now - timedelta(days=window_days)
 
-    sold = _sold_quantity(
-        db, organization_id=organization_id, product_id=product.id,
-        branch_id=branch_id, since=since,
-    )
-    avg_daily = (sold / Decimal(window_days)) if window_days else Decimal("0")
+    def sold(since_days: int, until_days: int | None = None) -> Decimal:
+        return _sold_quantity(
+            db, organization_id=organization_id, product_id=product.id,
+            branch_id=branch_id, since=now - timedelta(days=since_days),
+            until=None if until_days is None else now - timedelta(days=until_days),
+        )
 
-    # Trend: last 30 days vs the 30 days before that.
-    recent = _sold_quantity(
-        db, organization_id=organization_id, product_id=product.id,
-        branch_id=branch_id, since=now - timedelta(days=30),
-    )
-    prev = _sold_quantity(
-        db, organization_id=organization_id, product_id=product.id,
-        branch_id=branch_id, since=now - timedelta(days=60),
-        until=now - timedelta(days=30),
-    )
-    if prev > 0:
-        trend_pct = float((recent - prev) / prev * 100)
-    elif recent > 0:
-        trend_pct = 100.0
-    else:
-        trend_pct = 0.0
-    trend = "rising" if trend_pct > 10 else "falling" if trend_pct < -10 else "stable"
-
-    current = _current_stock(
-        db, organization_id=organization_id, product_id=product.id, branch_id=branch_id
-    )
-
-    reorder_point = avg_daily * Decimal(lead_time_days + safety_days)
-
-    stockout_date: str | None = None
-    if avg_daily > 0:
-        days_left = int((current / avg_daily))
-        stockout_date = (date.today() + timedelta(days=days_left)).isoformat()
-
-    target_qty = avg_daily * Decimal(target_coverage_days)
-    recommended = target_qty + reorder_point - current
-    if recommended < 0:
-        recommended = Decimal("0")
-
-    return Forecast(
+    return build_forecast(
         product_id=product.id,
         product_name=product.name,
-        current_stock=float(current),
-        avg_daily_sales=round(float(avg_daily), 3),
-        weekly_sales=round(float(avg_daily * 7), 2),
-        monthly_sales=round(float(avg_daily * 30), 2),
-        trend=trend,
-        trend_pct=round(trend_pct, 1),
-        reorder_point=round(float(reorder_point), 2),
-        estimated_stockout_date=stockout_date,
-        recommended_purchase_qty=round(float(recommended), 2),
+        purchase_price=product.purchase_price,
+        sold_in_window=sold(window_days),
+        sold_last_30=sold(30),
+        sold_prev_30=sold(60, 30),
+        current_stock=_current_stock(
+            db, organization_id=organization_id, product_id=product.id,
+            branch_id=branch_id,
+        ),
+        window_days=window_days,
+        lead_time_days=lead_time_days,
+        safety_days=safety_days,
+        target_coverage_days=target_coverage_days,
     )
 
 
@@ -193,40 +223,21 @@ def forecast_all(
 
     results = []
     for product in products:
-        sold = sold_90.get(product.id, Decimal("0"))
-        avg_daily = (sold / Decimal(window_days)) if window_days else Decimal("0")
-        recent = sold_30.get(product.id, Decimal("0"))
-        prev = sold_prev.get(product.id, Decimal("0"))
-        if prev > 0:
-            trend_pct = float((recent - prev) / prev * 100)
-        elif recent > 0:
-            trend_pct = 100.0
-        else:
-            trend_pct = 0.0
-        trend = "rising" if trend_pct > 10 else "falling" if trend_pct < -10 else "stable"
-        current = stock_map.get(product.id, Decimal("0"))
-        reorder_point = avg_daily * Decimal(lead_time_days + safety_days)
-        stockout_date: str | None = None
-        if avg_daily > 0:
-            days_left = int(current / avg_daily)
-            stockout_date = (date.today() + timedelta(days=days_left)).isoformat()
-        recommended = avg_daily * Decimal(target_coverage_days) + reorder_point - current
-        if recommended < 0:
-            recommended = Decimal("0")
-        if only_needing_purchase and recommended <= 0:
-            continue
-        results.append(Forecast(
+        forecast = build_forecast(
             product_id=product.id,
             product_name=product.name,
-            current_stock=float(current),
-            avg_daily_sales=round(float(avg_daily), 3),
-            weekly_sales=round(float(avg_daily * 7), 2),
-            monthly_sales=round(float(avg_daily * 30), 2),
-            trend=trend,
-            trend_pct=round(trend_pct, 1),
-            reorder_point=round(float(reorder_point), 2),
-            estimated_stockout_date=stockout_date,
-            recommended_purchase_qty=round(float(recommended), 2),
-        ).to_dict())
+            purchase_price=product.purchase_price,
+            sold_in_window=sold_90.get(product.id, Decimal("0")),
+            sold_last_30=sold_30.get(product.id, Decimal("0")),
+            sold_prev_30=sold_prev.get(product.id, Decimal("0")),
+            current_stock=stock_map.get(product.id, Decimal("0")),
+            window_days=window_days,
+            lead_time_days=lead_time_days,
+            safety_days=safety_days,
+            target_coverage_days=target_coverage_days,
+        )
+        if only_needing_purchase and forecast.recommended_purchase_qty <= 0:
+            continue
+        results.append(forecast.to_dict())
     results.sort(key=lambda r: r["recommended_purchase_qty"], reverse=True)
     return results

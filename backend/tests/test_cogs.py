@@ -2,14 +2,15 @@
 from decimal import Decimal
 
 from app.core.units import billed_to_stock_qty, is_loose_sale, pack_info
-from app.services.cogs import line_cogs_amount
+from app.services.cogs import billed_as_pack, line_cogs_amount, pack_divisor
 
 
 class _P:
-    def __init__(self, name, **attrs):
+    def __init__(self, name, sale_price="1100", **attrs):
         self.name = name
         self.attributes = attrs
         self.base_unit = "kg"
+        self.sale_price = Decimal(sale_price)
 
 
 def test_loose_kg_from_50kg_bag_is_fraction_of_pack():
@@ -47,3 +48,16 @@ def test_bottle_is_not_treated_as_loose_weight():
     assert not pack_info(p).allows_loose
     assert billed_to_stock_qty(p, Decimal("2"), "100MLS") == Decimal("2.000")
     assert billed_to_stock_qty(p, Decimal("2"), "ml") == Decimal("2.000")
+
+
+def test_kg_at_bag_price_is_a_pack_not_a_loose_kilo():
+    """PADDY 50KG bills stored unit=kg at ₹1,100 and issued a whole bag."""
+    p = _P("PADDY 50KG", sale_price="1100", packing="50KG")
+    assert is_loose_sale(p, "kg")
+    assert billed_as_pack(p, "kg", Decimal("1100"))
+    assert not billed_as_pack(p, "kg", Decimal("22"))
+    assert pack_divisor(p, "kg", Decimal("1100")) == Decimal("1")
+    assert pack_divisor(p, "kg", Decimal("22")) == Decimal("50")
+    # Report used to cost this as 1/50 of a bag (₹20) and show a 98% margin.
+    assert line_cogs_amount(p, 1, "kg", 1000, unit_price=1100) == Decimal("1000")
+    assert line_cogs_amount(p, 1, "kg", 1000, unit_price=22) == Decimal("20")

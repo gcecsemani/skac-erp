@@ -156,6 +156,7 @@ class CustomerOut(CustomerBase):
     id: int
     organization_id: int
     outstanding_balance: Decimal
+    last_bill_date: date | None = None
 
     model_config = {"from_attributes": True}
 
@@ -169,6 +170,12 @@ class StockReceiptIn(BaseModel):
     mfg_date: date | None = None
     expiry_date: date | None = None
     purchase_price: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class BatchCostIn(BaseModel):
+    """Pack cost for an existing batch. Used by product margin / P&L."""
+
+    purchase_price: Decimal = Field(ge=0)
 
 
 class StockAdjustIn(BaseModel):

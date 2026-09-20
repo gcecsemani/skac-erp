@@ -63,20 +63,37 @@ def _payment_shop_date(paid_at: datetime | None) -> date | None:
     return stored
 
 
-def _infer_payment_branch(db: Session, payment: CustomerPayment) -> int | None:
-    """Attribute an untagged khata receipt to the farmer's latest billed shop."""
-    if payment.branch_id is not None:
-        return payment.branch_id
-    return db.scalar(
-        select(Invoice.branch_id)
+def _latest_branch_by_customer(
+    db: Session, org_id: int, customer_ids: set[int]
+) -> dict[int, int]:
+    """Latest billed shop per farmer, for receipts that were never branch-tagged.
+
+    Resolved in one query for the whole day rather than one per receipt.
+    """
+    if not customer_ids:
+        return {}
+    ranked = (
+        select(
+            Invoice.customer_id.label("customer_id"),
+            Invoice.branch_id.label("branch_id"),
+            func.row_number()
+            .over(
+                partition_by=Invoice.customer_id,
+                order_by=(Invoice.invoice_date.desc(), Invoice.id.desc()),
+            )
+            .label("rn"),
+        )
         .where(
-            Invoice.customer_id == payment.customer_id,
-            Invoice.organization_id == payment.organization_id,
+            Invoice.organization_id == org_id,
+            Invoice.customer_id.in_(customer_ids),
             Invoice.status == InvoiceStatus.finalized,
         )
-        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
-        .limit(1)
+        .subquery()
     )
+    rows = db.execute(
+        select(ranked.c.customer_id, ranked.c.branch_id).where(ranked.c.rn == 1)
+    ).all()
+    return {int(cid): int(bid) for cid, bid in rows if cid is not None and bid is not None}
 
 
 def compute_expected(
@@ -97,30 +114,42 @@ def compute_expected(
     unscoped_in = Decimal("0")
     unscoped_out = Decimal("0")
 
-    inv_stmt = select(Invoice).where(
-        Invoice.organization_id == org_id,
-        Invoice.branch_id == branch_id,
-        Invoice.status == InvoiceStatus.finalized,
-        Invoice.invoice_date == close_date,
-    )
+    # Roll the day's bills up in SQL, grouped by payment mode; only the three
+    # money columns are needed, not whole Invoice rows.
+    inv_rows = db.execute(
+        select(
+            Invoice.payment_mode,
+            func.count(Invoice.id),
+            func.coalesce(func.sum(Invoice.grand_total), 0),
+            func.coalesce(func.sum(Invoice.amount_paid), 0),
+        )
+        .where(
+            Invoice.organization_id == org_id,
+            Invoice.branch_id == branch_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.invoice_date == close_date,
+        )
+        .group_by(Invoice.payment_mode)
+    ).all()
+
     bills = 0
     sales = Decimal("0")
     collected_inv = Decimal("0")
     khata_new = Decimal("0")
-    for inv in db.scalars(inv_stmt).all():
-        bills += 1
-        sales += _n(inv.grand_total)
-        paid = _n(inv.amount_paid)
-        due = _n(inv.grand_total) - paid
-        khata_new += due
+    for mode, count, total, paid_total in inv_rows:
+        total = _n(total)
+        paid = _n(paid_total)
+        bills += int(count or 0)
+        sales += total
+        khata_new += total - paid
         # Credit bills are unpaid at the till. Later farmer receipts are
         # CustomerPayment rows (khata_collected). Do not treat amount_paid
         # that was allocated onto a credit invoice as cash taken at billing.
-        if _mode_str(inv.payment_mode) == "credit":
+        if _mode_str(mode) == "credit":
             continue
         collected_inv += paid
         if paid > 0:
-            _add(in_by, _bucket(inv.payment_mode), paid)
+            _add(in_by, _bucket(mode), paid)
 
     pay_stmt = select(CustomerPayment).where(
         CustomerPayment.organization_id == org_id,
@@ -131,13 +160,21 @@ def compute_expected(
         select(func.count(Branch.id)).where(Branch.organization_id == org_id)
     ) or 0
     khata_collected = Decimal("0")
-    for p in db.scalars(pay_stmt).all():
-        if p.reversed_at is not None:
-            continue
-        if _payment_shop_date(p.paid_at) != close_date:
-            continue
+    payments = [
+        p
+        for p in db.scalars(pay_stmt).all()
+        if p.reversed_at is None and _payment_shop_date(p.paid_at) == close_date
+    ]
+    # Attribute untagged receipts to the farmer's latest billed shop, resolved
+    # for the whole day in one query.
+    inferred_branch = _latest_branch_by_customer(
+        db, org_id, {p.customer_id for p in payments if p.branch_id is None}
+    )
+    for p in payments:
         amt = _n(p.amount)
-        effective = _infer_payment_branch(db, p)
+        effective = (
+            p.branch_id if p.branch_id is not None else inferred_branch.get(p.customer_id)
+        )
         if effective == branch_id:
             khata_collected += amt
             _add(in_by, _bucket(p.mode), amt)

@@ -94,39 +94,38 @@ def allocate_fifo(
     Expiry-first satisfies the regulatory intent (sell soon-to-expire stock
     before it becomes unsaleable). Batches with no expiry sort last.
     """
-    stocks = db.scalars(
-        select(Stock)
+    # Join the batch in and sort in SQL: earliest expiry first (None last),
+    # then oldest batch. Reading batches through the relationship issued one
+    # query per candidate batch.
+    rows = db.execute(
+        select(Stock, Batch)
         .join(Batch, Batch.id == Stock.batch_id)
         .where(
             Stock.branch_id == branch_id,
             Stock.product_id == product_id,
             Stock.quantity > 0,
         )
+        .order_by(
+            Batch.expiry_date.is_(None),
+            Batch.expiry_date.asc(),
+            Stock.batch_id.asc(),
+        )
     ).all()
-
-    # Sort: earliest expiry first (None last), then oldest batch id.
-    far_future = date.max
-
-    def sort_key(s: Stock):
-        exp = s.batch.expiry_date or far_future
-        return (exp, s.batch_id)
-
-    stocks.sort(key=sort_key)
 
     remaining = Decimal(quantity)
     allocations: list[Allocation] = []
-    for stock in stocks:
+    for stock, batch in rows:
         if remaining <= 0:
             break
         take = min(stock.quantity, remaining)
         allocations.append(
             Allocation(
                 batch_id=stock.batch_id,
-                batch_no=stock.batch.batch_no,
-                mfg_date=stock.batch.mfg_date,
-                expiry_date=stock.batch.expiry_date,
+                batch_no=batch.batch_no,
+                mfg_date=batch.mfg_date,
+                expiry_date=batch.expiry_date,
                 quantity=take,
-                purchase_price=stock.batch.purchase_price,
+                purchase_price=batch.purchase_price,
             )
         )
         remaining -= take
@@ -198,12 +197,21 @@ def apply_issue(
 ) -> None:
     """Decrement stock and write movement ledger rows for each allocation."""
     occurred_at = occurred_at or datetime.utcnow()
+    batch_ids = {a.batch_id for a in allocations}
+    stocks: dict[int, Stock] = (
+        {
+            s.batch_id: s
+            for s in db.scalars(
+                select(Stock).where(
+                    Stock.branch_id == branch_id, Stock.batch_id.in_(batch_ids)
+                )
+            ).all()
+        }
+        if batch_ids
+        else {}
+    )
     for alloc in allocations:
-        stock = db.scalar(
-            select(Stock).where(
-                Stock.branch_id == branch_id, Stock.batch_id == alloc.batch_id
-            )
-        )
+        stock = stocks.get(alloc.batch_id)
         if stock is not None:
             stock.quantity = stock.quantity - alloc.quantity
         db.add(

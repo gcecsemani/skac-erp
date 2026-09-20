@@ -3,14 +3,13 @@ from __future__ import annotations
 
 from calendar import month_name
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer, CustomerPayment
-from app.models.enums import InvoiceStatus, MovementType, StockDiscrepancyStatus
+from app.models.enums import InvoiceStatus, StockDiscrepancyStatus
 from app.models.expense import Expense
 from app.models.field_visit import FieldVisit
 from app.models.inventory import Batch, Stock, StockDiscrepancy, StockMovement
@@ -20,7 +19,8 @@ from app.models.purchase import GRN, GRNItem
 from app.models.sales import Invoice, InvoiceItem
 from app.models.user import User
 from app.models.vendor import Vendor
-from app.services.cogs import line_cogs_expr, stock_qty_expr
+from app.services import accounting
+from app.services.cogs import grouped_totals, line_totals_stmt, overall_totals
 
 GROUPS = [
     {"id": "sales", "label": "Sales & margin"},
@@ -265,33 +265,23 @@ def _purchase(db, org_id, scope, start, end) -> dict:
 
 def _product_sales(db, org_id, scope, start, end) -> dict:
     stmt = (
-        select(
-            InvoiceItem.product_id,
-            InvoiceItem.product_name,
-            Product.category,
-            func.coalesce(func.sum(stock_qty_expr()), 0),
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.tax_amount), 0),
-            func.coalesce(func.sum(InvoiceItem.line_total), 0),
-        )
+        line_totals_stmt(InvoiceItem.product_id, InvoiceItem.product_name, Product.category)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .outerjoin(Product, Product.id == InvoiceItem.product_id)
     )
     stmt = _inv_filter(stmt, org_id, scope, start, end)
-    stmt = stmt.group_by(InvoiceItem.product_id, InvoiceItem.product_name, Product.category).order_by(
-        func.sum(InvoiceItem.line_total).desc()
-    )
     rows = [
         {
             "product": name,
             "category": _enum(cat).replace("_", " ").title() if cat else "—",
-            "qty": _qty(qty),
-            "taxable": _n(taxable),
-            "tax": _n(tax),
-            "amount": _n(total),
+            "qty": _qty(t.qty),
+            "taxable": _n(t.taxable),
+            "tax": _n(t.tax),
+            "amount": _n(t.total),
         }
-        for _pid, name, cat, qty, taxable, tax, total in db.execute(stmt).all()
+        for (_pid, name, cat), t in grouped_totals(db, stmt).items()
     ]
+    rows.sort(key=lambda r: r["amount"], reverse=True)
     return {
         "columns": [
             {"key": "product", "label": "Product"},
@@ -308,25 +298,19 @@ def _product_sales(db, org_id, scope, start, end) -> dict:
 
 def _category_sales(db, org_id, scope, start, end) -> dict:
     stmt = (
-        select(
-            Product.category,
-            func.coalesce(func.sum(stock_qty_expr()), 0),
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.line_total), 0),
-        )
+        line_totals_stmt(Product.category)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
     )
     stmt = _inv_filter(stmt, org_id, scope, start, end)
-    stmt = stmt.group_by(Product.category)
     rows = [
         {
             "category": _enum(cat).replace("_", " ").title(),
-            "qty": _qty(qty),
-            "taxable": _n(taxable),
-            "amount": _n(total),
+            "qty": _qty(t.qty),
+            "taxable": _n(t.taxable),
+            "amount": _n(t.total),
         }
-        for cat, qty, taxable, total in db.execute(stmt).all()
+        for (cat,), t in grouped_totals(db, stmt).items()
     ]
     rows.sort(key=lambda r: r["amount"], reverse=True)
     return {
@@ -344,20 +328,21 @@ def _category_sales(db, org_id, scope, start, end) -> dict:
 def _profit_loss(db, org_id, scope, start, end) -> dict:
     sales_stmt = _inv_filter(
         select(
-            func.coalesce(func.sum(Invoice.grand_total), 0),
+            func.coalesce(func.sum(Invoice.subtotal), 0),
             func.coalesce(func.sum(Invoice.tax_total), 0),
             func.coalesce(func.sum(Invoice.discount_total), 0),
+            func.coalesce(func.sum(Invoice.grand_total), 0),
         ),
         org_id, scope, start, end,
     )
-    sales, tax, discount = db.execute(sales_stmt).one()
+    subtotal, tax, discount, grand = db.execute(sales_stmt).one()
     cogs_stmt = (
-        select(func.coalesce(func.sum(line_cogs_expr()), 0))
+        line_totals_stmt()
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
     )
     cogs_stmt = _inv_filter(cogs_stmt, org_id, scope, start, end)
-    cogs = db.scalar(cogs_stmt) or 0
+    cogs = overall_totals(db, cogs_stmt).cogs
     exp_stmt = select(func.coalesce(func.sum(Expense.amount), 0)).where(
         Expense.organization_id == org_id,
         Expense.expense_date >= start,
@@ -366,14 +351,18 @@ def _profit_loss(db, org_id, scope, start, end) -> dict:
     if scope is not None:
         exp_stmt = exp_stmt.where(Expense.branch_id.in_(scope))
     expenses = db.scalar(exp_stmt) or 0
-    net_sales = _n(sales) - _n(tax)
+    # Invoice.subtotal is taxable *after* discount; list sales add it back so
+    # the discount line is a real deduction instead of a dangling figure.
+    net_sales = _n(subtotal)
+    list_sales = round(net_sales + _n(discount), 2)
     gross = net_sales - _n(cogs)
     net = gross - _n(expenses)
     rows = [
-        {"line": "Gross sales (incl. GST)", "amount": _n(sales)},
-        {"line": "GST collected", "amount": _n(tax)},
-        {"line": "Discounts", "amount": _n(discount)},
+        {"line": "Gross sales (excl. GST)", "amount": list_sales},
+        {"line": "Less: Discounts", "amount": _n(discount)},
         {"line": "Net sales (excl. GST)", "amount": round(net_sales, 2)},
+        {"line": "GST collected", "amount": _n(tax)},
+        {"line": "Collections (incl. GST)", "amount": _n(grand)},
         {"line": "Cost of goods sold", "amount": _n(cogs)},
         {"line": "Gross profit", "amount": round(gross, 2)},
         {"line": "Operating expenses", "amount": _n(expenses)},
@@ -530,29 +519,37 @@ def _expiry(db, org_id, scope, start, end) -> dict:
 
 
 def _low_stock(db, org_id, scope, start, end) -> dict:
-    qty_stmt = select(Stock.product_id, func.coalesce(func.sum(Stock.quantity), 0)).where(
-        Stock.organization_id == org_id
-    )
+    qty_sub = select(
+        Stock.product_id.label("product_id"),
+        func.coalesce(func.sum(Stock.quantity), 0).label("qty"),
+    ).where(Stock.organization_id == org_id)
     if scope is not None:
-        qty_stmt = qty_stmt.where(Stock.branch_id.in_(scope))
-    qty_stmt = qty_stmt.group_by(Stock.product_id)
-    qty_map = {pid: _qty(q) for pid, q in db.execute(qty_stmt).all()}
-    products = db.scalars(select(Product).where(
-        Product.organization_id == org_id, Product.is_deleted.is_(False)
-    ).order_by(Product.name)).all()
+        qty_sub = qty_sub.where(Stock.branch_id.in_(scope))
+    qty_sub = qty_sub.group_by(Stock.product_id).subquery()
+
+    # Outer join so SKUs with no stock row at all still show as out of stock,
+    # and let the database drop the healthy ones instead of loading the whole
+    # catalogue into Python.
+    on_hand = func.coalesce(qty_sub.c.qty, 0)
+    stmt = (
+        select(Product.name, Product.sku, on_hand, Product.reorder_level)
+        .outerjoin(qty_sub, qty_sub.c.product_id == Product.id)
+        .where(
+            Product.organization_id == org_id,
+            Product.is_deleted.is_(False),
+            or_(on_hand <= Product.reorder_level, on_hand <= 0),
+        )
+        .order_by(Product.name)
+    )
     rows = []
-    for p in products:
-        qty = qty_map.get(p.id, 0.0)
-        reorder = _qty(p.reorder_level)
-        if qty > reorder and qty > 0:
-            continue
-        status = "Out of stock" if qty <= 0 else "Low stock"
+    for name, sku, qty, reorder in db.execute(stmt).all():
+        qty = _qty(qty)
         rows.append({
-            "product": p.name,
-            "sku": p.sku,
+            "product": name,
+            "sku": sku,
             "on_hand": qty,
-            "reorder_level": reorder,
-            "status": status,
+            "reorder_level": _qty(reorder),
+            "status": "Out of stock" if qty <= 0 else "Low stock",
         })
     return {
         "columns": [
@@ -681,11 +678,7 @@ def _inactive_khata(db, org_id, scope, start, end) -> dict:
 
 
 def _supplier_outstanding(db, org_id, scope, start, end) -> dict:
-    rows = db.scalars(select(Vendor).where(
-        Vendor.organization_id == org_id,
-        Vendor.is_deleted.is_(False),
-        Vendor.outstanding_balance > 0,
-    ).order_by(Vendor.outstanding_balance.desc())).all()
+    rows = accounting.vendor_payables(db, organization_id=org_id)
     data = [
         {
             "vendor": v.name,
@@ -708,26 +701,12 @@ def _supplier_outstanding(db, org_id, scope, start, end) -> dict:
 
 
 def _gst(db, org_id, scope, start, end) -> dict:
-    stmt = (
-        select(
-            InvoiceItem.gst_rate,
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(InvoiceItem.tax_amount), 0),
+    rows = [
+        {**slab, "taxable": slab.pop("taxable_value")}
+        for slab in accounting.gst_slabs(
+            db, organization_id=org_id, start=start, end=end, branch_ids=scope
         )
-        .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
-    )
-    stmt = _inv_filter(stmt, org_id, scope, start, end).group_by(InvoiceItem.gst_rate)
-    rows = []
-    for rate, taxable, tax in db.execute(stmt).all():
-        tax_f = _n(tax)
-        rows.append({
-            "gst_rate": _n(rate),
-            "taxable": _n(taxable),
-            "cgst": round(tax_f / 2, 2),
-            "sgst": round(tax_f / 2, 2),
-            "total_tax": tax_f,
-        })
-    rows.sort(key=lambda r: r["gst_rate"])
+    ]
     return {
         "columns": [
             {"key": "gst_rate", "label": "GST %", "num": True},
@@ -899,27 +878,22 @@ def _field_visits(db, org_id, scope, start, end) -> dict:
 
 def _product_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
     stmt = (
-        select(
-            Product.name, Product.sku,
-            func.coalesce(func.sum(stock_qty_expr()), 0),
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(line_cogs_expr()), 0),
-        )
+        line_totals_stmt(Product.id, Product.name, Product.sku)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
     )
     stmt = _inv_filter(stmt, org_id, scope, start, end)
-    stmt = stmt.group_by(Product.id, Product.name, Product.sku)
     rows = []
-    for name, sku, qty, taxable, cogs in db.execute(stmt).all():
-        profit = _n(taxable) - _n(cogs)
-        margin = round(profit / _n(taxable) * 100, 1) if _n(taxable) else 0
+    for (_pid, name, sku), t in grouped_totals(db, stmt).items():
+        profit = _n(t.taxable) - _n(t.cogs)
+        margin = round(profit / _n(t.taxable) * 100, 1) if _n(t.taxable) else 0
         rows.append({
             "product": name,
             "sku": sku or "—",
-            "qty": _qty(qty),
-            "sales": _n(taxable),
-            "cost": _n(cogs),
+            "qty": _qty(t.qty),
+            "discount": _n(t.discount),
+            "sales": _n(t.taxable),
+            "cost": _n(t.cogs),
             "profit": round(profit, 2),
             "margin_pct": margin,
         })
@@ -931,6 +905,7 @@ def _product_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
             {"key": "product", "label": "Product"},
             {"key": "sku", "label": "SKU"},
             {"key": "qty", "label": "Qty sold", "num": True},
+            {"key": "discount", "label": "Discount", "num": True, "money": True},
             {"key": "sales", "label": "Sales (excl. GST)", "num": True, "money": True},
             {"key": "cost", "label": "Cost", "num": True, "money": True},
             {"key": "profit", "label": "Profit / (loss)", "num": True, "money": True},
@@ -957,28 +932,31 @@ def _product_loss(db, org_id, scope, start, end) -> dict:
 
 def _farmer_margins(db, org_id, scope, start, end, *, lowest: bool) -> dict:
     stmt = (
-        select(
-            Customer.id, Customer.name, Customer.village, Customer.phone,
-            func.coalesce(func.sum(InvoiceItem.taxable_value), 0),
-            func.coalesce(func.sum(line_cogs_expr()), 0),
-            func.count(func.distinct(Invoice.id)),
-        )
+        line_totals_stmt(Customer.id, Customer.name, Customer.village, Customer.phone)
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .join(Product, Product.id == InvoiceItem.product_id)
         .outerjoin(Customer, Customer.id == Invoice.customer_id)
     )
     stmt = _inv_filter(stmt, org_id, scope, start, end)
-    stmt = stmt.group_by(Customer.id, Customer.name, Customer.village, Customer.phone)
+    # Bills are counted separately: the totals query also groups by product and
+    # billed unit, so a COUNT DISTINCT there would repeat per line.
+    bills_stmt = _inv_filter(
+        select(Invoice.customer_id, func.count(func.distinct(Invoice.id)))
+        .join(InvoiceItem, InvoiceItem.invoice_id == Invoice.id)
+        .join(Product, Product.id == InvoiceItem.product_id),
+        org_id, scope, start, end,
+    ).group_by(Invoice.customer_id)
+    bills_by_customer = {cid: int(n) for cid, n in db.execute(bills_stmt).all()}
     rows = []
-    for cid, name, village, phone, taxable, cogs, bills in db.execute(stmt).all():
-        profit = _n(taxable) - _n(cogs)
+    for (cid, name, village, phone), t in grouped_totals(db, stmt).items():
+        profit = _n(t.taxable) - _n(t.cogs)
         rows.append({
             "farmer": name or "Walk-in",
             "village": village or "—",
             "phone": phone or "—",
-            "bills": int(bills),
-            "sales": _n(taxable),
-            "cost": _n(cogs),
+            "bills": bills_by_customer.get(cid, 0),
+            "sales": _n(t.taxable),
+            "cost": _n(t.cogs),
             "profit": round(profit, 2),
         })
     rows.sort(key=lambda r: r["profit"], reverse=not lowest)

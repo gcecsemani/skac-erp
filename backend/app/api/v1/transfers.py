@@ -7,7 +7,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -50,13 +50,24 @@ def _branch_address(b: Branch | None) -> str | None:
     return ", ".join(parts) or None
 
 
-def _serialize(db: Session, t: StockTransfer) -> dict:
+def _batches_by_id(db: Session, batch_ids) -> dict[int, Batch]:
+    ids = {b for b in batch_ids if b}
+    if not ids:
+        return {}
+    return {b.id: b for b in db.scalars(select(Batch).where(Batch.id.in_(ids))).all()}
+
+
+def _serialize(
+    db: Session, t: StockTransfer, batches: dict[int, Batch] | None = None
+) -> dict:
     from_b = db.get(Branch, t.from_branch_id)
     to_b = db.get(Branch, t.to_branch_id)
     org = from_b.organization if from_b is not None else None
+    if batches is None:
+        batches = _batches_by_id(db, (i.batch_id for i in t.items))
     items = []
     for i in t.items:
-        batch = db.get(Batch, i.batch_id) if i.batch_id else None
+        batch = batches.get(i.batch_id) if i.batch_id else None
         items.append({
             "product_id": i.product_id,
             "product_name": i.product_name,
@@ -103,7 +114,12 @@ def list_transfers(
         stmt = stmt.where(
             StockTransfer.transfer_no.ilike(like) | StockTransfer.notes.ilike(like)
         )
-    return [_serialize(db, t) for t in db.scalars(stmt.limit(limit)).all()]
+    rows = db.scalars(
+        stmt.options(selectinload(StockTransfer.items)).limit(limit)
+    ).all()
+    # Resolve every referenced batch once for the whole page.
+    batches = _batches_by_id(db, (i.batch_id for t in rows for i in t.items))
+    return [_serialize(db, t, batches) for t in rows]
 
 
 @router.post("", status_code=201)

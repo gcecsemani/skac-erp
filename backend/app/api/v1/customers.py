@@ -6,8 +6,8 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core import rbac
 from app.core.audit import record_audit
@@ -48,6 +48,27 @@ def _assert_unique_aadhaar(db: Session, org_id: int, aadhaar: str | None, exclud
         raise HTTPException(status_code=409, detail="A farmer with this Aadhaar number already exists")
 
 
+def _attach_last_bill_dates(db: Session, org_id: int, customers: list[Customer]) -> list[Customer]:
+    """POS picker uses this to tell walk-in staff who still shops here."""
+    ids = [c.id for c in customers]
+    last: dict[int, date] = {}
+    if ids:
+        last = dict(
+            db.execute(
+                select(Invoice.customer_id, func.max(Invoice.invoice_date))
+                .where(
+                    Invoice.organization_id == org_id,
+                    Invoice.status == InvoiceStatus.finalized,
+                    Invoice.customer_id.in_(ids),
+                )
+                .group_by(Invoice.customer_id)
+            ).all()
+        )
+    for customer in customers:
+        customer.last_bill_date = last.get(customer.id)
+    return customers
+
+
 @router.get("", response_model=list[CustomerOut])
 def list_customers(
     search: str | None = None,
@@ -72,7 +93,7 @@ def list_customers(
     if outstanding_only:
         stmt = stmt.where(Customer.outstanding_balance > 0)
     stmt = stmt.order_by(Customer.outstanding_balance.desc(), Customer.name.asc()).limit(limit)
-    return list(db.scalars(stmt).all())
+    return _attach_last_bill_dates(db, current.organization_id, list(db.scalars(stmt).all()))
 
 
 @router.post("", response_model=CustomerOut, status_code=201)
@@ -226,8 +247,16 @@ def _unallocate_receipt(db: Session, *, payment: CustomerPayment) -> None:
         )
     ).all()
     if allocs:
+        allocated = {
+            inv.id: inv
+            for inv in db.scalars(
+                select(Invoice).where(
+                    Invoice.id.in_({row.invoice_id for row in allocs})
+                )
+            ).all()
+        }
         for row in allocs:
-            inv = db.get(Invoice, row.invoice_id)
+            inv = allocated.get(row.invoice_id)
             if inv is not None:
                 inv.amount_paid = (inv.amount_paid - row.amount).quantize(Decimal("0.01"))
                 if inv.amount_paid < 0:
@@ -366,6 +395,52 @@ def reverse_customer_payment(
         "amount": float(amount),
         "outstanding_balance": float(customer.outstanding_balance),
     }
+
+
+@router.get("/{customer_id}/bills")
+def customer_bills(
+    customer_id: int,
+    limit: int = Query(12, ge=1, le=30),
+    current: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Recent invoices with line items — used by POS while the farmer is on the bill."""
+    customer = _get_owned_customer(db, customer_id, current.organization_id)
+    invoices = db.scalars(
+        select(Invoice)
+        .options(selectinload(Invoice.items))
+        .where(
+            Invoice.organization_id == current.organization_id,
+            Invoice.customer_id == customer.id,
+            Invoice.status == InvoiceStatus.finalized,
+        )
+        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+        .limit(limit)
+    ).unique().all()
+    return [
+        {
+            "id": inv.id,
+            "invoice_no": inv.invoice_no,
+            "date": inv.invoice_date.isoformat(),
+            "grand_total": float(inv.grand_total),
+            "amount_paid": float(inv.amount_paid),
+            "payment_mode": (
+                inv.payment_mode.value if hasattr(inv.payment_mode, "value") else str(inv.payment_mode)
+            ),
+            "items": [
+                {
+                    "product_name": it.product_name,
+                    "quantity": float(it.quantity),
+                    "unit": it.unit,
+                    "unit_price": float(it.unit_price),
+                    "discount": float(it.discount or 0),
+                    "line_total": float(it.line_total),
+                }
+                for it in inv.items
+            ],
+        }
+        for inv in invoices
+    ]
 
 
 @router.get("/{customer_id}/ledger")

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +14,9 @@ from app.models.mixins import PKMixin, TimestampMixin
 
 class FieldVisit(Base, PKMixin, TimestampMixin):
     __tablename__ = "field_visit"
+    __table_args__ = (
+        Index("ix_field_visit_org_date", "organization_id", "visit_date"),
+    )
 
     organization_id: Mapped[int] = mapped_column(
         ForeignKey("organization.id"), nullable=False, index=True

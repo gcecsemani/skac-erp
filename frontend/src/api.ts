@@ -25,6 +25,8 @@ export function setSession(access: string, refresh?: string) {
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(REFRESH_KEY);
+  // The next user must not inherit this user's branch scope.
+  clearBranchCache();
 }
 
 function tokenExpiresSoon(token: string, skewMs = 60_000): boolean {
@@ -144,6 +146,12 @@ const put = <T,>(p: string, body?: any) =>
   request<T>(p, { method: "PUT", body: JSON.stringify(body ?? {}) });
 const del = <T,>(p: string) => request<T>(p, { method: "DELETE" });
 
+let branchCache: Promise<any[]> | null = null;
+/** Drop the shared branch list so the next read refetches it. */
+export function clearBranchCache() {
+  branchCache = null;
+}
+
 export const api = {
   // auth
   login: (email: string, password: string, totp_code?: string) =>
@@ -155,10 +163,20 @@ export const api = {
   verify2fa: (code: string) => post("/auth/2fa/verify", { code }),
 
   // masters
-  branches: () => get<any[]>("/branches"),
-  createBranch: (b: any) => post("/branches", b),
-  updateBranch: (id: number, b: any) => put(`/branches/${id}`, b),
-  deleteBranch: (id: number) => del(`/branches/${id}`),
+  // Nearly every page needs the branch list on mount. It changes only when an
+  // owner edits a shop, so share one request instead of refetching per route.
+  branches: () => {
+    if (!branchCache) {
+      branchCache = get<any[]>("/branches").catch((e) => {
+        branchCache = null;
+        throw e;
+      });
+    }
+    return branchCache;
+  },
+  createBranch: (b: any) => post("/branches", b).finally(clearBranchCache),
+  updateBranch: (id: number, b: any) => put(`/branches/${id}`, b).finally(clearBranchCache),
+  deleteBranch: (id: number) => del(`/branches/${id}`).finally(clearBranchCache),
   products: (search?: string, category?: string, limit?: number, branchId?: number) => {
     const p = new URLSearchParams();
     if (search) p.set("search", search);
@@ -188,6 +206,8 @@ export const api = {
   stock: (branchId?: number) => get<any[]>(`/inventory/stock${branchId ? `?branch_id=${branchId}` : ""}`),
   receiveStock: (r: any) => post("/inventory/receive", r),
   adjustStock: (r: any) => post("/inventory/adjust", r),
+  updateBatchCost: (batchId: number, purchase_price: number) =>
+    put<any>(`/inventory/batches/${batchId}`, { purchase_price }),
   forecast: (onlyNeeding = false) => get<any[]>(`/inventory/forecast?only_needing_purchase=${onlyNeeding}`),
   logStockCount: (r: any) => post<any>("/inventory/discrepancies", r),
   investigateStockCase: (id: number) => post<any>(`/inventory/discrepancies/${id}/investigate`, {}),
@@ -246,8 +266,6 @@ export const api = {
   createPurchaseReturn: (p: any) => post<any>("/purchasing/returns", p),
   reverseGRN: (id: number, p: any) => post<any>(`/purchasing/grn/${id}/reverse`, p),
   vendorPayment: (p: any) => post("/purchasing/payments", p),
-  vendorPayments: (vendorId?: number) =>
-    get<any[]>(`/purchasing/payments${vendorId ? `?vendor_id=${vendorId}` : ""}`),
   reverseVendorPayment: (id: number, p: any) => post<any>(`/purchasing/payments/${id}/reverse`, p),
 
   expenses: (opts?: { branchId?: number; start?: string; end?: string; category?: string }) => {
@@ -324,9 +342,6 @@ export const api = {
     const q = p.toString();
     return get<any>(`/reports/dashboard${q ? `?${q}` : ""}`, opts?.signal ? { signal: opts.signal } : undefined);
   },
-  stockValuation: (branchId?: number) => get<any>(`/reports/stock-valuation${branchId ? `?branch_id=${branchId}` : ""}`),
-  movers: () => get<any>("/reports/movers"),
-  farmerHistory: (id: number) => get<any>(`/reports/farmer/${id}/history`),
   runReport: (type: string, opts?: { branchId?: number; start?: string; end?: string; signal?: AbortSignal }) => {
     const p = new URLSearchParams({ type });
     if (opts?.branchId) p.set("branch_id", String(opts.branchId));
@@ -338,6 +353,8 @@ export const api = {
   reverseCustomerPayment: (customerId: number, paymentId: number, p: any) =>
     post<any>(`/customers/${customerId}/payments/${paymentId}/reverse`, p),
   customerLedger: (id: number) => get<any>(`/customers/${id}/ledger`),
+  customerBills: (id: number, limit?: number) =>
+    get<any[]>(`/customers/${id}/bills${limit ? `?limit=${limit}` : ""}`),
   remindCustomer: (id: number, send = true) =>
     post<any>(`/customers/${id}/remind?send=${send}`),
 

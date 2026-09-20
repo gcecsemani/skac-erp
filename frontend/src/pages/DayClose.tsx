@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { Banknote, Landmark, CheckCircle2, AlertTriangle } from "lucide-react";
 import { api } from "../api";
-import { inr, localISODate } from "../format";
+import { inr, todayISO } from "../format";
 import { Badge, BranchSelect, Card, Field, Loading, PageHeader, StatCard, Table } from "../components/ui";
 import * as V from "../validate";
 
-const today = () => localISODate();
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 function tone(v: number) {
@@ -25,7 +24,7 @@ function Line({ label, value, strong, danger }: { label: string; value: number; 
 export default function DayClose() {
   const [branches, setBranches] = useState<any[]>([]);
   const [branchId, setBranchId] = useState(0);
-  const [closeDate, setCloseDate] = useState(today);
+  const [closeDate, setCloseDate] = useState(todayISO);
   const [preview, setPreview] = useState<any | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [openingCash, setOpeningCash] = useState("");

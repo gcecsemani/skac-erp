@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core import rbac
@@ -16,7 +16,13 @@ from app.models.enums import MovementType, StockDiscrepancyStatus
 from app.models.inventory import Batch, Stock, StockDiscrepancy, StockMovement
 from app.models.product import Product
 from app.models.purchase import GRN, GRNItem, PurchaseReturn, PurchaseReturnItem
-from app.schemas.masters import StockAdjustIn, StockDiscrepancyIn, StockDiscrepancyResolveIn, StockReceiptIn
+from app.schemas.masters import (
+    BatchCostIn,
+    StockAdjustIn,
+    StockDiscrepancyIn,
+    StockDiscrepancyResolveIn,
+    StockReceiptIn,
+)
 from app.services import inventory as inv
 from app.services.ai import forecasting
 from app.services.inventory import InsufficientStock
@@ -57,7 +63,12 @@ def receive_stock(
     current: CurrentUser = Depends(require_permission(rbac.P_INVENTORY_MANAGE)),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Goods receipt: create/find the batch and add stock to a branch."""
+    """Add opening / correction stock to a branch without a supplier bill.
+
+    This is NOT a purchase. It raises no payable and posts no purchase entry,
+    so it is tagged as an adjustment in the movement ledger. Stock bought from
+    a supplier must go through POST /purchasing/grn to keep the books right.
+    """
     current.assert_branch_access(payload.branch_id)
 
     batch = db.scalar(
@@ -84,6 +95,8 @@ def receive_stock(
         product_id=payload.product_id,
         batch_id=batch.id,
         quantity=payload.quantity,
+        movement_type=MovementType.adjustment,
+        note="Opening / correction stock (no supplier bill)",
     )
     record_audit(
         db, action="create", entity_type="stock_receipt", entity_id=batch.id,
@@ -235,6 +248,8 @@ def adjust_stock(
 @router.get("/stock")
 def list_stock(
     branch_id: int | None = None,
+    search: str | None = None,
+    limit: int = Query(1000, ge=1, le=5000),
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
@@ -249,6 +264,12 @@ def list_stock(
         stmt = stmt.where(Stock.branch_id == branch_id)
     elif not current.sees_all_branches:
         stmt = stmt.where(Stock.branch_id.in_(current.branch_ids or [-1]))
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(Product.name.ilike(like), Product.sku.ilike(like), Batch.batch_no.ilike(like))
+        )
+    stmt = stmt.order_by(Product.name.asc(), Batch.expiry_date.asc()).limit(limit)
 
     out = []
     for stock, batch, product in db.execute(stmt).all():
@@ -256,12 +277,45 @@ def list_stock(
             "branch_id": stock.branch_id,
             "product_id": product.id,
             "product": product.name,
+            "sku": product.sku,
             "batch_id": batch.id,
             "batch_no": batch.batch_no,
             "expiry_date": batch.expiry_date.isoformat() if batch.expiry_date else None,
             "quantity": float(stock.quantity),
+            "purchase_price": float(batch.purchase_price or 0),
+            "product_purchase_price": float(product.purchase_price or 0),
         })
     return out
+
+
+@router.put("/batches/{batch_id}")
+def update_batch_cost(
+    batch_id: int,
+    payload: BatchCostIn,
+    current: CurrentUser = Depends(require_permission(rbac.P_INVENTORY_MANAGE)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Correct the pack cost on a batch. Product margin and P&L read this value."""
+    batch = db.get(Batch, batch_id)
+    if batch is None or batch.organization_id != current.organization_id:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    before = batch.purchase_price
+    batch.purchase_price = payload.purchase_price
+    record_audit(
+        db, action="update", entity_type="batch", entity_id=batch.id,
+        actor_user_id=current.id, organization_id=current.organization_id,
+        changes={
+            "batch_no": batch.batch_no,
+            "purchase_price": {"from": float(before or 0), "to": float(payload.purchase_price)},
+        },
+    )
+    db.commit()
+    db.refresh(batch)
+    return {
+        "batch_id": batch.id,
+        "batch_no": batch.batch_no,
+        "purchase_price": float(batch.purchase_price or 0),
+    }
 
 
 @router.get("/forecast")

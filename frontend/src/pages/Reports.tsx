@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { inr, localISODate, matchesQuery, num } from "../format";
+import { inr, localISODate, matchesQuery, monthStartISO, num, todayISO } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, Table } from "../components/ui";
 import * as V from "../validate";
 
@@ -61,11 +61,6 @@ function reportFromQuery() {
   return found ? { group: found.group, key: found.key } : { group: "sales", key: "daily_sales" };
 }
 
-const monthStart = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
-};
-const today = () => localISODate();
 
 const QTY_KEYS = new Set([
   "opening", "loaded", "sold", "sale_return", "purchase_return",
@@ -97,8 +92,8 @@ export default function Reports() {
   const [key, setKey] = useState(initial.key);
   const [branches, setBranches] = useState<any[]>([]);
   const [branchId, setBranchId] = useState(0);
-  const [start, setStart] = useState(monthStart);
-  const [end, setEnd] = useState(today);
+  const [start, setStart] = useState(monthStartISO);
+  const [end, setEnd] = useState(todayISO);
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
