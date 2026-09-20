@@ -211,17 +211,31 @@ export default function POS() {
     const p = products.find((x) => x.id === l.product_id);
     const info = packInfo(p || { name: l.name, sale_unit: l.unit });
     const loose = info.allowsLoose && l.unit === info.looseUnit;
-    const min = loose ? 0.01 : 0.001;
-    const next = Number.isFinite(q) ? Math.max(min, q) : min;
+    const min = loose ? 0.01 : 1;
+    let next = Number.isFinite(q) ? Math.max(min, q) : min;
+    if (!loose) next = Math.max(1, Math.round(next));
+    else next = Math.round(next * 1000) / 1000;
     const stock = p ? stockOf(p) : null;
     const others = stockUsed(l.product_id) - billedToStock(l.quantity, l.unit, info);
     const need = billedToStock(next, l.unit, info);
     if (stock != null && others + need > stock + 1e-9) {
-      const leftPacks = Math.max(min, stock - others);
-      const maxBilled = loose ? leftPacks * info.packSize : leftPacks;
-      setMsg({ text: `Only ${Math.round(maxBilled * 1000) / 1000} ${l.unit} of ${l.name} available at this branch.`, ok: false });
-      return { ...l, quantity: Math.round(maxBilled * 1000) / 1000 };
+      const leftPacks = Math.max(0, stock - others);
+      if (loose) {
+        const maxBilled = Math.round(leftPacks * info.packSize * 1000) / 1000;
+        setMsg({ text: `Only ${maxBilled} ${l.unit} of ${l.name} left.`, ok: false });
+        return { ...l, quantity: Math.max(min, maxBilled) };
+      }
+      const whole = Math.floor(leftPacks + 1e-9);
+      const leftoverKg = Math.round((leftPacks - whole) * info.packSize * 1000) / 1000;
+      setMsg({
+        text: leftoverKg > 0 && info.allowsLoose
+          ? `Only ${whole} ${l.unit} left as whole packs. ${leftoverKg} ${info.looseUnit} is an opened pack — add as ${info.looseUnit}.`
+          : `Only ${whole} ${l.unit} of ${l.name} left.`,
+        ok: false,
+      });
+      return { ...l, quantity: whole >= 1 ? whole : l.quantity };
     }
+    setMsg(null);
     return { ...l, quantity: next };
   }));
   const setLineUnit = (key: string, nextUnit: string) => setLines((cur) => {
@@ -533,7 +547,7 @@ export default function POS() {
                           </select>
                         ) : l.unit}
                       </td>
-                      <td className="num"><input type="number" min={loose ? 0.01 : 0.001} step={loose ? 0.01 : 1} value={l.quantity} onChange={(e) => setQty(l.key, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
+                      <td className="num"><input type="number" min={loose ? 0.01 : 1} step={loose ? 0.01 : 1} value={l.quantity} onChange={(e) => setQty(l.key, Number(e.target.value))} style={{ width: 64, padding: 6, textAlign: "right" }} /></td>
                       <td className="num">
                         {inr(l.unit_price)}
                         {priced && priced.discount > 0 && l.quantity > 0 && (
