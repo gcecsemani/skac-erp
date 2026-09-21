@@ -31,8 +31,10 @@ const REPORTS: ReportDef[] = [
     blurb: "Profit after cost, per product. High sales with thin or negative margin is a problem, not a win." },
   { key: "farmer_profit", label: "Top farmers", group: "sales", needsDates: true,
     blurb: "Who buys from you and how much margin those bills leave. Your best farmers to keep close." },
-  { key: "customer_outstanding", label: "Khata outstanding", group: "collections", needsDates: false,
-    blurb: "Everyone who still owes the shop. Call the top of this list first." },
+  { key: "customer_outstanding", label: "Khata outstanding", group: "collections", needsDates: true,
+    blurb: "Opening, billed on khata, collected, and closing for the dates you pick. Filter by shop, then search a village to see who still owes." },
+  { key: "khata_by_village", label: "Khata by village", group: "collections", needsDates: true,
+    blurb: "The same khata movement rolled up by village. Use this to see which villages carry the most outstanding." },
   { key: "inactive_khata", label: "Khata not visiting", group: "collections", needsDates: false,
     blurb: "Farmers who owe money and have not billed in 30 days. These balances go stale unless you follow up." },
   { key: "payment_collection", label: "Money collected", group: "collections", needsDates: true,
@@ -43,6 +45,8 @@ const REPORTS: ReportDef[] = [
     blurb: "What the shop still owes vendors. Pay these before credit is blocked." },
   { key: "inventory", label: "Stock on hand", group: "stock", needsDates: false,
     blurb: "Quantity and rupee value sitting in each shop. Capital locked in bags and bottles." },
+  { key: "vendor_stock", label: "Vendor-wise stock", group: "stock", needsDates: true,
+    blurb: "Received and sold in the dates you pick, and how many are still on the shelf, by the supplier on the GRN. Search a vendor to see that supplier's movement." },
   { key: "expiry", label: "Expiry risk", group: "stock", needsDates: false,
     blurb: "Batches expiring in 60 days. Sell, return, or write off before they become unsaleable." },
   { key: "low_stock", label: "Reorder", group: "stock", needsDates: false,
@@ -63,7 +67,7 @@ function reportFromQuery() {
 
 
 const QTY_KEYS = new Set([
-  "opening", "loaded", "sold", "sale_return", "purchase_return",
+  "opening", "loaded", "received", "sold", "sale_return", "purchase_return",
   "transfer_in", "transfer_out", "adjustment", "expected", "left",
   "ledger_gap", "counted", "gap",
 ]);
@@ -100,6 +104,7 @@ export default function Reports() {
   const [q, setQ] = useState("");
   const [category, setCategory] = useState("all");
   const [view, setView] = useState("all");
+  const [village, setVillage] = useState("all");
   const [countRow, setCountRow] = useState<any | null>(null);
   const [countForm, setCountForm] = useState({ counted: "", note: "" });
   const [countErr, setCountErr] = useState("");
@@ -114,6 +119,8 @@ export default function Reports() {
   const current = REPORTS.find((r) => r.key === key) || REPORTS[0];
   const inGroup = useMemo(() => REPORTS.filter((r) => r.group === group), [group]);
   const isRecon = key === "stock_reconcile";
+  const isVendorStock = key === "vendor_stock";
+  const isKhata = key === "customer_outstanding" || key === "khata_by_village";
 
   const reload = () => api.runReport(key, {
     branchId: branchId || undefined, start, end,
@@ -140,11 +147,28 @@ export default function Reports() {
     setGroup(id);
     const first = REPORTS.find((r) => r.group === id);
     if (first) setKey(first.key);
-    setQ(""); setCategory("all"); setView("all");
+    setQ(""); setCategory("all"); setView("all"); setVillage("all");
   };
+
+  const villages = useMemo(() => {
+    const names = new Set<string>();
+    for (const r of data?.rows || []) {
+      if (r.village) names.add(String(r.village));
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [data]);
 
   const rows = useMemo(() => {
     const src = data?.rows || [];
+    if (isVendorStock) {
+      return src.filter((r: any) => matchesQuery(q, r.vendor, r.product, r.sku, r.branch));
+    }
+    if (isKhata) {
+      return src.filter((r: any) => {
+        if (village !== "all" && String(r.village || "") !== village) return false;
+        return matchesQuery(q, r.customer, r.phone, r.village, r.branch);
+      });
+    }
     if (!isRecon) return src;
     return src.filter((r: any) => {
       if (category !== "all" && String(r.category || "").toLowerCase() !== category) return false;
@@ -157,7 +181,7 @@ export default function Reports() {
       if (view === "short") return Number(r.gap) < 0 || (r.gap == null && Number(r.ledger_gap) < 0);
       return true;
     });
-  }, [data, isRecon, q, category, view]);
+  }, [data, isRecon, isVendorStock, isKhata, q, category, view, village]);
 
   const columns = (data?.columns || []).map((c: any) => {
     const col: any = { key: c.key, label: c.label, num: !!c.num };
@@ -229,7 +253,7 @@ export default function Reports() {
 
       <div className="report-nav">
         {inGroup.map((r) => (
-          <button key={r.key} className={key === r.key ? "on" : ""} onClick={() => setKey(r.key)}>{r.label}</button>
+          <button key={r.key} className={key === r.key ? "on" : ""} onClick={() => { setKey(r.key); setVillage("all"); setQ(""); }}>{r.label}</button>
         ))}
       </div>
 
@@ -248,6 +272,18 @@ export default function Reports() {
             </>
           ) : (
             <span className="muted" style={{ fontSize: 13 }}>Snapshot as of today — date range does not apply</span>
+          )}
+          {isKhata && (
+            <>
+              <SearchInput value={q} onChange={setQ} placeholder="Search farmer, village or phone…" />
+              <select value={village} onChange={(e) => setVillage(e.target.value)} style={{ width: "auto" }}>
+                <option value="all">All villages</option>
+                {villages.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            </>
+          )}
+          {isVendorStock && (
+            <SearchInput value={q} onChange={setQ} placeholder="Search vendor or product…" />
           )}
           {isRecon && (
             <>
