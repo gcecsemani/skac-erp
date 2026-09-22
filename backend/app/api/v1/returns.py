@@ -16,6 +16,7 @@ from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.core.units import billed_to_stock_qty
 from app.models.customer import Customer
 from app.models.enums import MovementType
+from app.models.organization import Branch
 from app.models.product import Product
 from app.models.returns import CreditNote, CreditNoteItem
 from app.models.sales import Invoice, InvoiceItem
@@ -40,19 +41,27 @@ class CreditNoteIn(BaseModel):
 @router.get("")
 def list_credit_notes(
     search: str | None = None,
+    branch_id: int | None = None,
+    on: date | None = None,
     limit: int = Query(200, ge=1, le=1000),
     current: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     stmt = (
-        select(CreditNote, Invoice.invoice_no, Customer.name, Customer.village, Customer.phone)
+        select(CreditNote, Invoice.invoice_no, Customer.name, Customer.village, Customer.phone, Branch.name)
         .outerjoin(Invoice, Invoice.id == CreditNote.invoice_id)
         .outerjoin(Customer, Customer.id == CreditNote.customer_id)
+        .outerjoin(Branch, Branch.id == CreditNote.branch_id)
         .where(CreditNote.organization_id == current.organization_id)
         .order_by(CreditNote.id.desc())
     )
-    if not current.sees_all_branches:
+    if branch_id is not None:
+        current.assert_branch_access(branch_id)
+        stmt = stmt.where(CreditNote.branch_id == branch_id)
+    elif not current.sees_all_branches:
         stmt = stmt.where(CreditNote.branch_id.in_(current.branch_ids or [-1]))
+    if on is not None:
+        stmt = stmt.where(CreditNote.note_date == on)
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(
@@ -71,9 +80,11 @@ def list_credit_notes(
             "customer_name": farmer_name,
             "customer_village": village,
             "customer_phone": phone,
+            "branch_id": c.branch_id,
+            "branch_name": branch_name,
             "date": c.note_date.isoformat(), "reason": c.reason, "total": float(c.total),
         }
-        for c, invoice_no, farmer_name, village, phone in rows
+        for c, invoice_no, farmer_name, village, phone, branch_name in rows
     ]
 
 

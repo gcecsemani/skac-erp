@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.deps import CurrentUser, get_current_user, require_permission
 from app.models.customer import Customer, CustomerPayment, CustomerPaymentAllocation
 from app.models.enums import InvoiceStatus
+from app.models.returns import CreditNote
 from app.models.sales import Invoice
 from app.models.organization import Branch, Organization
 from app.schemas.masters import CustomerCreate, CustomerOut, CustomerWrite
@@ -255,6 +256,18 @@ def _default_payment_branch(
     return None
 
 
+def _credit_totals(db: Session, invoice_ids: set[int]) -> dict[int, Decimal]:
+    """Sales-return totals already issued against each invoice."""
+    if not invoice_ids:
+        return {}
+    rows = db.execute(
+        select(CreditNote.invoice_id, func.coalesce(func.sum(CreditNote.total), 0))
+        .where(CreditNote.invoice_id.in_(invoice_ids))
+        .group_by(CreditNote.invoice_id)
+    ).all()
+    return {int(iid): Decimal(total) for iid, total in rows}
+
+
 def _allocate_receipt_to_invoices(
     db: Session, *, customer_id: int, amount: Decimal, payment_id: int
 ) -> Decimal:
@@ -269,8 +282,10 @@ def _allocate_receipt_to_invoices(
         )
         .order_by(Invoice.invoice_date.asc(), Invoice.id.asc())
     ).all()
+    credited = _credit_totals(db, {inv.id for inv in invoices})
     for inv in invoices:
-        due = (inv.grand_total - inv.amount_paid)
+        due = (inv.grand_total - inv.amount_paid - credited.get(inv.id, Decimal("0")))
+        due = due.quantize(Decimal("0.01"))
         if due <= 0:
             continue
         apply = due if remaining >= due else remaining
@@ -504,7 +519,7 @@ def customer_ledger(
         .limit(200)
     ).all()
     invoices = db.execute(
-        select(Invoice.invoice_no, Invoice.invoice_date, Invoice.grand_total, Invoice.amount_paid)
+        select(Invoice.id, Invoice.invoice_no, Invoice.invoice_date, Invoice.grand_total, Invoice.amount_paid)
         .where(
             Invoice.organization_id == current.organization_id,
             Invoice.customer_id == customer.id,
@@ -513,12 +528,112 @@ def customer_ledger(
         .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
         .limit(200)
     ).all()
+    credit_notes = db.execute(
+        select(CreditNote, Invoice.invoice_no)
+        .outerjoin(Invoice, Invoice.id == CreditNote.invoice_id)
+        .where(
+            CreditNote.organization_id == current.organization_id,
+            CreditNote.customer_id == customer.id,
+        )
+        .order_by(CreditNote.note_date.asc(), CreditNote.id.asc())
+    ).all()
+    returned_by_invoice: dict[int, Decimal] = {}
+    for note, _inv_no in credit_notes:
+        returned_by_invoice[note.invoice_id] = (
+            returned_by_invoice.get(note.invoice_id, Decimal("0")) + Decimal(note.total)
+        )
+    alloc_rows = db.execute(
+        select(
+            CustomerPaymentAllocation.invoice_id,
+            func.coalesce(func.sum(CustomerPaymentAllocation.amount), 0),
+        )
+        .join(CustomerPayment, CustomerPayment.id == CustomerPaymentAllocation.payment_id)
+        .where(
+            CustomerPayment.customer_id == customer.id,
+            CustomerPayment.reversed_at.is_(None),
+        )
+        .group_by(CustomerPaymentAllocation.invoice_id)
+    ).all()
+    alloc_by_invoice = {int(iid): Decimal(amt) for iid, amt in alloc_rows}
+
+    entries: list[dict] = []
+    for iid, no, d, total, paid in invoices:
+        khata = (Decimal(total) - Decimal(paid) + alloc_by_invoice.get(int(iid), Decimal("0")))
+        if khata > Decimal("0.004"):
+            entries.append({
+                "kind": "invoice",
+                "date": d.isoformat(),
+                "ref": no,
+                "debit": float(khata.quantize(Decimal("0.01"))),
+                "credit": 0,
+                "note": "Billed on khata",
+            })
+    for p in payments:
+        paid_at = p.paid_at.strftime("%Y-%m-%d %H:%M") if p.paid_at else ""
+        note = " · ".join(part for part in (p.mode, p.note) if part)
+        entries.append({
+            "kind": "payment",
+            "id": p.id,
+            "date": paid_at,
+            "ref": f"PMT-{p.id}",
+            "debit": 0,
+            "credit": float(p.amount),
+            "note": note or "Collection",
+            "reversed": p.reversed_at is not None,
+        })
+        if p.reversed_at is not None:
+            entries.append({
+                "kind": "payment_reversal",
+                "date": p.reversed_at.strftime("%Y-%m-%d %H:%M"),
+                "ref": f"REV-{p.id}",
+                "debit": float(p.amount),
+                "credit": 0,
+                "note": p.reversal_reason or "Reversed",
+                "reversed": True,
+            })
+    for note, inv_no in credit_notes:
+        detail = f"Against {inv_no}" if inv_no else "Sales return"
+        if note.reason:
+            detail = f"{detail} · {note.reason}"
+        entries.append({
+            "kind": "return",
+            "date": note.note_date.isoformat(),
+            "ref": note.note_no,
+            "debit": 0,
+            "credit": float(note.total),
+            "note": detail,
+        })
+
+    outstanding = float(customer.outstanding_balance or 0)
+    movement = round(sum(e["debit"] - e["credit"] for e in entries), 2)
+    gap = round(outstanding - movement, 2)
+    has_opening = abs(gap) >= 0.01
+    if has_opening:
+        entries.append({
+            "kind": "opening",
+            "date": "",
+            "ref": "Opening",
+            "debit": gap if gap > 0 else 0,
+            "credit": -gap if gap < 0 else 0,
+            "note": "Brought forward, not on a bill in this ledger",
+        })
+    entries.sort(key=lambda e: (
+        e["date"] or "",
+        {"opening": 0, "invoice": 1, "return": 2, "payment": 3, "payment_reversal": 4}.get(e["kind"], 9),
+        e.get("ref") or "",
+    ))
+    running = 0.0
+    for e in entries:
+        running += e["debit"] - e["credit"]
+        e["balance"] = round(running, 2)
+
     return {
         "id": customer.id,
         "name": customer.name,
         "phone": customer.phone,
         "village": customer.village,
-        "outstanding_balance": float(customer.outstanding_balance or 0),
+        "outstanding_balance": outstanding,
+        "has_opening": has_opening,
         "payments": [
             {
                 "id": p.id,
@@ -531,14 +646,18 @@ def customer_ledger(
             }
             for p in payments
         ],
+        "entries": entries,
         "invoices": [
             {
                 "invoice_no": no,
                 "date": d.isoformat(),
                 "total": float(total),
-                "outstanding": float(total - paid),
+                "returned": float(returned_by_invoice.get(int(iid), Decimal("0"))),
+                "outstanding": float(
+                    Decimal(total) - Decimal(paid) - returned_by_invoice.get(int(iid), Decimal("0"))
+                ),
             }
-            for no, d, total, paid in invoices
+            for iid, no, d, total, paid in invoices
         ],
     }
 

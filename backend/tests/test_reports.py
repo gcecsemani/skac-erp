@@ -290,6 +290,33 @@ def test_khata_by_village_rolls_up_closing_balance(db, org, branch):
     assert rows["Chetpet"]["outstanding"] == 250.0
 
 
+def test_inactive_khata_lists_only_the_filtered_branch(db, org, branch):
+    from datetime import timedelta
+    from app.models.organization import Branch
+
+    other = Branch(organization_id=org.id, code="BR02", name="Second")
+    db.add(other)
+    db.flush()
+    here = _farmer(db, org, "Here Farmer", "Kalvai", "9000000201")
+    there = _farmer(db, org, "There Farmer", "Chetpet", "9000000202")
+    recent = _farmer(db, org, "Recent Farmer", "Kalvai", "9000000203")
+    there.outstanding_balance = Decimal("9000")
+    old = TODAY - timedelta(days=45)
+    _khata_bill(db, org, branch, here, "800", when=old)
+    _khata_bill(db, org, other, there, "300", when=old)
+    _khata_bill(db, org, branch, recent, "100", when=TODAY)
+    db.flush()
+
+    rows = run_report(
+        db, key="inactive_khata", org_id=org.id, scope=[branch.id], start=TODAY, end=TODAY,
+    )["rows"]
+    names = [r["customer"] for r in rows]
+    assert names == ["Here Farmer"]
+    assert rows[0]["branch"] == branch.name
+    assert rows[0]["outstanding"] == 800.0
+    assert rows[0]["village"] == "Kalvai"
+
+
 def test_khata_reports_are_listed_on_the_reports_screen():
     from app.services.report_tables import visible_catalog
     keys = [c["key"] for c in visible_catalog()]

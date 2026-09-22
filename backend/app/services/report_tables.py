@@ -47,7 +47,7 @@ CATALOG = [
     {"key": "khata_by_village", "label": "Khata by village", "group": "collections", "needs_dates": True,
      "blurb": "The same khata movement rolled up by village. Use this to see which villages carry the most outstanding."},
     {"key": "inactive_khata", "label": "Khata not visiting", "group": "collections", "needs_dates": False,
-     "blurb": "Farmers who owe money and have not billed in 30 days. These balances go stale unless you follow up."},
+     "blurb": "Farmers who still owe the selected shop and have not billed there in 30 days. Outstanding is that shop's khata: billed minus collected minus sales returns."},
     {"key": "payment_collection", "label": "Money collected", "group": "collections", "needs_dates": True,
      "blurb": "Cash, UPI and khata receipts in the period. Match this to day close and the bank."},
     {"key": "purchase", "label": "Purchases", "group": "buying", "needs_dates": True,
@@ -745,6 +745,7 @@ def _khata_buckets(db, org_id, scope, start, end) -> list[dict]:
         last_bill = r["last_bill"]
         rows.append({
             "customer_id": r["customer_id"],
+            "branch_id": r["branch_id"],
             "customer": c.name,
             "phone": c.phone or "—",
             "village": (c.village or "").strip() or "—",
@@ -830,57 +831,95 @@ def _khata_by_village(db, org_id, scope, start, end) -> dict:
     }
 
 
-def _inactive_khata(db, org_id, scope, start, end) -> dict:
-    """Khata farmers with no bill in the last 30 days (as of the report end date)."""
-    days = 30
-    cutoff = end - timedelta(days=days)
-    last_sale = (
-        select(
-            Invoice.customer_id,
-            func.max(Invoice.invoice_date).label("last_date"),
-            func.count(Invoice.id).label("bills"),
-        )
-        .where(
-            Invoice.organization_id == org_id,
-            Invoice.status == InvoiceStatus.finalized,
-            Invoice.customer_id.is_not(None),
-        )
-        .group_by(Invoice.customer_id)
-    )
-    if scope is not None:
-        last_sale = last_sale.where(Invoice.branch_id.in_(scope))
-    last_sale = last_sale.subquery()
-    stmt = (
-        select(Customer, last_sale.c.last_date, last_sale.c.bills)
-        .outerjoin(last_sale, last_sale.c.customer_id == Customer.id)
-        .where(
+def _inactive_khata(db, org_id, scope, start, end, idle_days: int = 30) -> dict:
+    """Farmers with khata at the selected shop who have not billed there recently.
+
+    Outstanding is the shop balance (billed − collected − sales returns), not the
+    farmer's balance at every shop. A branch filter used to outer-join every
+    farmer with a balance, so other shops' names appeared as "Never" visited.
+    """
+    as_of = date.today()
+    cutoff = as_of - timedelta(days=idle_days)
+    farmers = _khata_buckets(db, org_id, scope, date(2000, 1, 1), as_of)
+    picked: list[tuple[dict, date | None]] = []
+    for r in farmers:
+        if r["outstanding"] <= 0.004:
+            continue
+        last_raw = r.get("last_bill") or "Never"
+        last_date = None if last_raw == "Never" else date.fromisoformat(str(last_raw)[:10])
+        if last_date is not None and last_date > cutoff:
+            continue
+        picked.append((r, last_date))
+
+    # Brought-forward balances with no bill, collection, or return cannot be
+    # tied to a shop, so they only appear when every branch is included.
+    if scope is None:
+        seen = {int(r["customer_id"]) for r in farmers}
+        extra_stmt = select(Customer).where(
             Customer.organization_id == org_id,
             Customer.is_deleted.is_(False),
             Customer.outstanding_balance > 0,
-            or_(last_sale.c.last_date.is_(None), last_sale.c.last_date <= cutoff),
         )
-        .order_by(Customer.outstanding_balance.desc())
-    )
+        if seen:
+            extra_stmt = extra_stmt.where(Customer.id.notin_(seen))
+        for c in db.scalars(extra_stmt).all():
+            picked.append((
+                {
+                    "customer_id": c.id,
+                    "branch_id": 0,
+                    "customer": c.name,
+                    "phone": c.phone or "—",
+                    "village": (c.village or "").strip() or "—",
+                    "branch": "—",
+                    "outstanding": _n(c.outstanding_balance),
+                    "last_bill": "Never",
+                },
+                None,
+            ))
+
+    ids = [int(r["customer_id"]) for r, _ in picked]
+    counts: dict[tuple[int, int], int] = {}
+    if ids:
+        count_stmt = (
+            select(Invoice.customer_id, Invoice.branch_id, func.count(Invoice.id))
+            .where(
+                Invoice.organization_id == org_id,
+                Invoice.status == InvoiceStatus.finalized,
+                Invoice.customer_id.in_(ids),
+                Invoice.invoice_date <= as_of,
+            )
+            .group_by(Invoice.customer_id, Invoice.branch_id)
+        )
+        if scope is not None:
+            count_stmt = count_stmt.where(Invoice.branch_id.in_(scope))
+        counts = {
+            (int(cid), int(bid)): int(n)
+            for cid, bid, n in db.execute(count_stmt).all()
+        }
+
     data = []
-    for c, last_date, bills in db.execute(stmt).all():
+    for r, last_date in picked:
         data.append({
-            "customer": c.name,
-            "phone": c.phone or "—",
-            "village": c.village or "—",
-            "outstanding": _n(c.outstanding_balance),
-            "last_bill": last_date.isoformat() if last_date else "Never",
-            "days_idle": (end - last_date).days if last_date else None,
-            "bills": int(bills or 0),
+            "customer": r["customer"],
+            "phone": r["phone"],
+            "village": r["village"],
+            "branch": r.get("branch") or "—",
+            "outstanding": r["outstanding"],
+            "last_bill": r.get("last_bill") or "Never",
+            "days_idle": (as_of - last_date).days if last_date else "—",
+            "bills": counts.get((int(r["customer_id"]), int(r.get("branch_id") or 0)), 0),
         })
+    data.sort(key=lambda x: (-x["outstanding"], str(x["customer"]).lower()))
     return {
         "columns": [
             {"key": "customer", "label": "Farmer"},
             {"key": "phone", "label": "Phone"},
             {"key": "village", "label": "Village"},
+            {"key": "branch", "label": "Branch"},
             {"key": "outstanding", "label": "Outstanding", "num": True, "money": True},
             {"key": "last_bill", "label": "Last bill"},
             {"key": "days_idle", "label": "Days idle", "num": True},
-            {"key": "bills", "label": "Lifetime bills", "num": True},
+            {"key": "bills", "label": "Bills at shop", "num": True},
         ],
         "rows": data,
         "summary": [

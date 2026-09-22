@@ -301,26 +301,33 @@ export default function Customers() {
             {ledger.phone || "No phone"}{ledger.village ? ` · ${ledger.village}` : ""} · Outstanding{" "}
             <strong style={{ color: Number(ledger.outstanding_balance) > 0 ? "var(--danger)" : "inherit" }}>{inr(ledger.outstanding_balance)}</strong>
           </p>
-          <h3 style={{ fontSize: 14, margin: "4px 0 8px" }}>Khata collections</h3>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Outstanding is khata billed, minus collections, minus sales returns. A sales return does not cancel the original invoice. The invoice stays finalized, and the credit note is what reduces the balance.
+            {ledger.has_opening ? " This farmer also has a brought-forward balance that is not on a bill below." : ""}
+          </p>
+          <h3 style={{ fontSize: 14, margin: "4px 0 8px" }}>Statement</h3>
           <Table
             columns={[
-              { key: "paid_at", label: "Date", render: (r) => String(r.paid_at || "").replace("T", " ").slice(0, 16) },
-              { key: "mode", label: "Mode" },
-              { key: "note", label: "Note", render: (r) => r.reversed_at ? (r.reversal_reason || "Reversed") : (r.note || "—") },
-              { key: "amount", label: "Amount", num: true, render: (r) => (
-                <span style={r.reversed_at ? { textDecoration: "line-through", opacity: 0.55 } : undefined}>{inr(r.amount)}</span>
+              { key: "date", label: "Date", render: (r) => r.date || "—" },
+              { key: "kind", label: "Type", render: (r) => (
+                <Badge tone={r.kind === "payment" ? "success" : r.kind === "return" ? "warn" : r.kind === "payment_reversal" ? "danger" : "info"}>
+                  {r.kind === "payment" ? "Collection" : r.kind === "return" ? "Sales return" : r.kind === "payment_reversal" ? "Collection reversed" : r.kind === "opening" ? "Opening" : "Bill"}
+                </Badge>
               ) },
-              { key: "status", label: "", render: (r) => r.reversed_at
-                ? <Badge tone="danger">Reversed</Badge>
-                : (
-                  <button className="btn btn-ghost btn-sm" title="Reverse this collection" onClick={() => {
-                    setRevErr(""); setRevReason(""); setRevPay(r);
-                  }}><Undo2 size={14} /> Reverse</button>
-                ) },
+              { key: "ref", label: "Ref" },
+              { key: "note", label: "Note", render: (r) => r.note || "—" },
+              { key: "debit", label: "Billed", num: true, render: (r) => r.debit ? inr(r.debit) : "—" },
+              { key: "credit", label: "Collected / returned", num: true, render: (r) => r.credit ? inr(r.credit) : "—" },
+              { key: "balance", label: "Balance", num: true, render: (r) => inr(r.balance) },
+              { key: "actions", label: "", render: (r) => r.kind === "payment" && !r.reversed ? (
+                <button className="btn btn-ghost btn-sm" title="Reverse this collection" onClick={() => {
+                  setRevErr(""); setRevReason(""); setRevPay({ id: r.id, amount: r.credit });
+                }}><Undo2 size={14} /> Reverse</button>
+              ) : r.reversed ? <Badge tone="danger">Reversed</Badge> : null },
             ]}
-            rows={ledger.payments || []}
-            empty="No khata collections recorded yet"
-            scroll={false}
+            rows={ledger.entries || []}
+            empty="No bills, collections, or sales returns yet"
+            pageSize={25}
           />
           <h3 style={{ fontSize: 14, margin: "16px 0 8px" }}>Invoices</h3>
           <Table
@@ -328,7 +335,8 @@ export default function Customers() {
               { key: "invoice_no", label: "Invoice #" },
               { key: "date", label: "Date" },
               { key: "total", label: "Total", num: true, render: (r) => inr(r.total) },
-              { key: "outstanding", label: "Balance", num: true, render: (r) => Number(r.outstanding) > 0 ? inr(r.outstanding) : "Paid" },
+              { key: "returned", label: "Returned", num: true, render: (r) => Number(r.returned) > 0 ? inr(r.returned) : "—" },
+              { key: "outstanding", label: "Balance", num: true, render: (r) => Math.abs(Number(r.outstanding)) < 0.005 ? "Paid" : inr(r.outstanding) },
             ]}
             rows={ledger.invoices || []}
             empty="No invoices for this farmer"

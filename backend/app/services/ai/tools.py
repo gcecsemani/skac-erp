@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Callable
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
@@ -383,73 +383,28 @@ def inactive_credit_customers(
     """Farmers with outstanding credit who have not billed in the last N days."""
     days = _clamp_int(days, 30, 1, 3650)
     limit = _clamp_int(limit, 500, 1, 2000)
-    cutoff = date.today() - timedelta(days=days)
-
-    last_sale = (
-        select(
-            Invoice.customer_id,
-            func.max(Invoice.invoice_date).label("last_date"),
-            func.count(Invoice.id).label("bills"),
-            func.coalesce(func.sum(Invoice.grand_total), 0).label("lifetime_sales"),
-        )
-        .where(
-            Invoice.organization_id == ctx.organization_id,
-            Invoice.status == InvoiceStatus.finalized,
-            Invoice.customer_id.isnot(None),
-        )
-        .group_by(Invoice.customer_id)
-    )
-    if ctx.branch_ids is not None:
-        last_sale = last_sale.where(Invoice.branch_id.in_(ctx.branch_ids))
-    last_sale = last_sale.subquery()
-
-    stmt = (
-        select(Customer, last_sale.c.last_date, last_sale.c.bills, last_sale.c.lifetime_sales)
-        .outerjoin(last_sale, last_sale.c.customer_id == Customer.id)
-        .where(
-            Customer.organization_id == ctx.organization_id,
-            Customer.is_deleted.is_(False),
-            Customer.outstanding_balance > 0,
-            or_(last_sale.c.last_date.is_(None), last_sale.c.last_date <= cutoff),
-        )
-        .order_by(Customer.outstanding_balance.desc())
-        .limit(limit)
-    )
-    if min_amount is not None:
-        stmt = stmt.where(Customer.outstanding_balance >= float(min_amount))
-
-    agg = select(
-        func.count(Customer.id),
-        func.coalesce(func.sum(Customer.outstanding_balance), 0),
-    ).select_from(Customer).outerjoin(
-        last_sale, last_sale.c.customer_id == Customer.id
-    ).where(
-        Customer.organization_id == ctx.organization_id,
-        Customer.is_deleted.is_(False),
-        Customer.outstanding_balance > 0,
-        or_(last_sale.c.last_date.is_(None), last_sale.c.last_date <= cutoff),
-    )
-    if min_amount is not None:
-        agg = agg.where(Customer.outstanding_balance >= float(min_amount))
-    total_count, total_os = ctx.db.execute(agg).one()
-
     today = date.today()
-    rows = []
-    for c, last_date, bills, lifetime in ctx.db.execute(stmt).all():
-        outstanding = round(float(c.outstanding_balance), 2)
-        rows.append({
-            "name": c.name,
-            "phone": c.phone or "—",
-            "village": c.village or "—",
-            "district": c.district or "—",
+    report = report_tables._inactive_khata(
+        ctx.db, ctx.organization_id, ctx.branch_ids, today, today, idle_days=days,
+    )
+    matched = []
+    for r in report["rows"]:
+        outstanding = float(r["outstanding"])
+        if min_amount is not None and outstanding < float(min_amount):
+            continue
+        matched.append({
+            "name": r["customer"],
+            "phone": r["phone"],
+            "village": r["village"],
+            "branch": r.get("branch") or "—",
             "outstanding": outstanding,
-            "last_purchase": last_date.isoformat() if last_date else "Never",
-            "days_since_visit": (today - last_date).days if last_date else None,
-            "lifetime_bills": int(bills or 0),
-            "lifetime_sales": round(float(lifetime or 0), 2),
+            "last_purchase": r["last_bill"],
+            "days_since_visit": r["days_idle"],
+            "lifetime_bills": int(r.get("bills") or 0),
         })
-    total_count = int(total_count or 0)
-    total = round(float(total_os or 0), 2)
+    total_count = len(matched)
+    total = round(sum(r["outstanding"] for r in matched), 2)
+    rows = matched[:limit]
     payload = _with_report(
         {
             "days": days,
@@ -462,12 +417,11 @@ def inactive_credit_customers(
             {"key": "name", "label": "Farmer"},
             {"key": "phone", "label": "Phone"},
             {"key": "village", "label": "Village"},
-            {"key": "district", "label": "District"},
+            {"key": "branch", "label": "Branch"},
             {"key": "outstanding", "label": "Outstanding", "num": True, "money": True},
             {"key": "last_purchase", "label": "Last bill"},
             {"key": "days_since_visit", "label": "Days since visit", "num": True},
-            {"key": "lifetime_bills", "label": "Lifetime bills", "num": True},
-            {"key": "lifetime_sales", "label": "Lifetime sales", "num": True, "money": True},
+            {"key": "lifetime_bills", "label": "Bills at shop", "num": True},
         ],
         rows,
     )

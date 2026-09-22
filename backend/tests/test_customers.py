@@ -115,6 +115,86 @@ def test_create_customer_restores_soft_deleted_same_phone(db, org):
     assert old.village == "AARPAKKAM"
 
 
+def test_customer_ledger_shows_sales_return_without_cancelling_invoice(db, org, branch):
+    from datetime import date
+    from app.api.v1.customers import customer_ledger
+    from app.models.enums import InvoiceStatus, PaymentMode
+    from app.models.returns import CreditNote
+    from app.models.sales import Invoice
+
+    current = _current(db, org)
+    farmer = Customer(
+        organization_id=org.id, name="Ramesh", phone="9000000301",
+        village="Kalvai", outstanding_balance=Decimal("800"), credit_allowed=True,
+    )
+    db.add(farmer)
+    db.flush()
+    inv = Invoice(
+        organization_id=org.id, branch_id=branch.id, customer_id=farmer.id,
+        invoice_date=date.today(), status=InvoiceStatus.finalized,
+        payment_mode=PaymentMode.credit, invoice_no="INV/1",
+        grand_total=Decimal("1000"), amount_paid=Decimal("0"),
+    )
+    db.add(inv)
+    db.flush()
+    db.add(CreditNote(
+        organization_id=org.id, branch_id=branch.id, invoice_id=inv.id,
+        customer_id=farmer.id, note_no="CN/1", note_date=date.today(),
+        reason="Damaged", total=Decimal("200"),
+    ))
+    db.flush()
+
+    out = customer_ledger(farmer.id, current, db)
+    assert inv.status == InvoiceStatus.finalized
+    kinds = [e["kind"] for e in out["entries"]]
+    assert kinds == ["invoice", "return"]
+    assert out["entries"][-1]["balance"] == 800.0
+    assert out["invoices"][0]["returned"] == 200.0
+    assert out["invoices"][0]["outstanding"] == 800.0
+    assert out["has_opening"] is False
+
+
+def test_collection_does_not_settle_already_returned_amount(db, org, branch):
+    from datetime import date
+    from app.api.v1.customers import _allocate_receipt_to_invoices
+    from app.models.customer import CustomerPayment
+    from app.models.enums import InvoiceStatus, PaymentMode
+    from app.models.returns import CreditNote
+    from app.models.sales import Invoice
+
+    farmer = Customer(
+        organization_id=org.id, name="Ramesh", phone="9000000302",
+        village="Kalvai", outstanding_balance=Decimal("800"), credit_allowed=True,
+    )
+    db.add(farmer)
+    db.flush()
+    inv = Invoice(
+        organization_id=org.id, branch_id=branch.id, customer_id=farmer.id,
+        invoice_date=date.today(), status=InvoiceStatus.finalized,
+        payment_mode=PaymentMode.credit, invoice_no="INV/2",
+        grand_total=Decimal("1000"), amount_paid=Decimal("0"),
+    )
+    db.add(inv)
+    db.flush()
+    db.add(CreditNote(
+        organization_id=org.id, branch_id=branch.id, invoice_id=inv.id,
+        customer_id=farmer.id, note_no="CN/2", note_date=date.today(),
+        reason="Damaged", total=Decimal("200"),
+    ))
+    pay = CustomerPayment(
+        organization_id=org.id, branch_id=branch.id, customer_id=farmer.id,
+        amount=Decimal("1000"), mode="cash",
+    )
+    db.add(pay)
+    db.flush()
+
+    leftover = _allocate_receipt_to_invoices(
+        db, customer_id=farmer.id, amount=Decimal("1000"), payment_id=pay.id,
+    )
+    assert inv.amount_paid == Decimal("800.00")
+    assert leftover == Decimal("200.00")
+
+
 def test_create_customer_rejects_duplicate_active_phone(db, org):
     current = _current(db, org)
     db.add(Customer(

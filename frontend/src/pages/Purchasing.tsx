@@ -218,7 +218,13 @@ export default function Purchasing() {
             unit_price: Number(ln.unit_price || 0), expiry_date: ln.expiry_date || null,
           })),
         });
-      } else if (modal === "pay") await api.vendorPayment({ vendor_id: Number(form.vendor_id), branch_id: Number(form.branch_id), amount: Number(form.amount), mode: form.mode || "cash" });
+      } else if (modal === "pay") {
+        const vendorId = Number(form.vendor_id);
+        await api.vendorPayment({ vendor_id: vendorId, branch_id: Number(form.branch_id), amount: Number(form.amount), mode: form.mode || "cash", note: form.note });
+        setModal(null); setGrnDetail(null); await loadAll();
+        setLedger(await api.vendorLedger(vendorId));
+        return;
+      }
       else if (modal === "pret") {
         const over = (grnDetail?.items || []).find((it: any) => (returnQty[it.id] || 0) > Number(it.returnable));
         if (over) {
@@ -274,7 +280,7 @@ export default function Purchasing() {
               { key: "outstanding_balance", label: "Payable", num: true, render: (r) => <strong style={{ color: r.outstanding_balance > 0 ? "var(--danger)" : "inherit" }}>{inr(r.outstanding_balance)}</strong> },
               { key: "actions", label: "", render: (r) => (
                 <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
-                  <button className="icon-btn" style={{ width: 30, height: 30 }} title="Payment ledger" onClick={() => openLedger(r)}><BookOpen size={14} /></button>
+                  <button className="btn btn-ghost btn-sm" title="Payment ledger" onClick={() => openLedger(r)}><BookOpen size={14} /> Ledger</button>
                   <button className="icon-btn" style={{ width: 30, height: 30 }} title="Edit" onClick={() => openEditVendor(r)}><Pencil size={14} /></button>
                   <button className="icon-btn" style={{ width: 30, height: 30 }} title="Delete" onClick={() => removeVendor(r)}><Trash2 size={14} /></button>
                 </div>
@@ -447,12 +453,17 @@ export default function Purchasing() {
             </div>
           )}
           {modal === "pay" && (
-            <div className="grid grid-2">
-              <Field label="Amount"><input type="number" onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
-              <Field label="Mode">
-                <PaymentSelect value={form.mode || "cash"} onChange={(mode) => setForm({ ...form, mode })} use="purchase" bundle={bundle} />
-              </Field>
-            </div>
+            <>
+              <p className="muted" style={{ marginTop: 0 }}>
+                The payment is posted to this vendor's ledger with the date and time, and the running balance updates. The ledger opens after you save.
+              </p>
+              <div className="grid grid-2">
+                <Field label="Amount"><input type="number" onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
+                <Field label="Mode">
+                  <PaymentSelect value={form.mode || "cash"} onChange={(mode) => setForm({ ...form, mode })} use="purchase" bundle={bundle} />
+                </Field>
+              </div>
+            </>
           )}
           {modal === "pret" && (
             <>
@@ -519,6 +530,9 @@ export default function Purchasing() {
           footer={<button className="btn btn-ghost" onClick={() => setLedger(null)}>Close</button>}>
           <p className="muted" style={{ marginTop: 0 }}>
             GSTIN {ledger.gstin || "—"} · Phone {ledger.phone || "—"} · Outstanding <strong style={{ color: ledger.outstanding_balance > 0 ? "var(--danger)" : "inherit" }}>{inr(ledger.outstanding_balance)}</strong>
+          </p>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Payments show the date and time they were adjusted. Balance is what is still payable after that line.
           </p>
           <Table
             columns={[

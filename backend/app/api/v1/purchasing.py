@@ -271,21 +271,21 @@ def vendor_ledger(
             "note": g.vendor_invoice_no,
         })
     for p in payments:
-        paid_date = p.paid_at.date().isoformat() if p.paid_at else None
+        paid_at = p.paid_at.strftime("%Y-%m-%d %H:%M") if p.paid_at else None
         entries.append({
             "kind": "payment",
             "id": p.id,
-            "date": paid_date,
+            "date": paid_at,
             "ref": f"PAY-{p.id}",
             "debit": 0,
             "credit": float(p.amount),
-            "note": p.note or p.mode,
+            "note": " · ".join(part for part in (p.mode, p.note) if part) or "Payment",
             "reversed": p.reversed_at is not None,
         })
         if p.reversed_at is not None:
             entries.append({
                 "kind": "payment_reversal",
-                "date": p.reversed_at.date().isoformat(),
+                "date": p.reversed_at.strftime("%Y-%m-%d %H:%M"),
                 "ref": f"REV-{p.id}",
                 "debit": float(p.amount),
                 "credit": 0,
@@ -922,7 +922,7 @@ def create_payment(
     payment = VendorPayment(
         organization_id=current.organization_id, branch_id=payload.branch_id,
         vendor_id=payload.vendor_id, amount=payload.amount, mode=payload.mode,
-        note=payload.note,
+        note=payload.note, paid_at=datetime.now(),
     )
     db.add(payment)
     db.flush()

@@ -97,7 +97,7 @@ class VendorPayment(Base, PKMixin, TimestampMixin):
     )
     branch_id: Mapped[int | None] = mapped_column(ForeignKey("branch.id"))
     vendor_id: Mapped[int] = mapped_column(ForeignKey("vendor.id"), nullable=False, index=True)
-    paid_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    paid_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     mode: Mapped[str] = mapped_column(String(20), default="cash")
     note: Mapped[str | None] = mapped_column(String(255))

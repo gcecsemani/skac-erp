@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Plus, Undo2 } from "lucide-react";
 import { api } from "../api";
-import { inr, matchesQuery } from "../format";
-import { Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
+import { useAuth } from "../auth";
+import { inr, matchesQuery, todayISO } from "../format";
+import { BranchSelect, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
+import { seesAllBranches } from "../roles";
 import * as V from "../validate";
 
 export default function Returns() {
+  const { user } = useAuth();
+  const allBranches = seesAllBranches(user);
   const [rows, setRows] = useState<any[] | null>(null);
+  const [branches, setBranches] = useState<any[]>([]);
+  const [branchId, setBranchId] = useState(0);
+  const [day, setDay] = useState(todayISO());
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [invoiceId, setInvoiceId] = useState<number | "">("");
@@ -20,8 +27,17 @@ export default function Returns() {
   const findAc = useRef<AbortController | null>(null);
   const findSeq = useRef(0);
 
-  const load = () => api.creditNotes().then(setRows).catch(() => setRows([]));
-  useEffect(() => { load(); }, []);
+  const load = () => api.creditNotes({
+    branchId: branchId || undefined,
+    on: day || undefined,
+  }).then(setRows).catch(() => setRows([]));
+  useEffect(() => {
+    api.branches().then((b) => {
+      setBranches(b);
+      if (!allBranches && b[0]) setBranchId(b[0].id);
+    }).catch(() => setBranches([]));
+  }, []);
+  useEffect(() => { load(); }, [branchId, day]);
 
   const filtered = useMemo(
     () => (rows || []).filter((r) => matchesQuery(q, r.note_no, r.date, r.invoice_id, r.invoice_no, r.reason, r.total, r.customer_name, r.customer_village, r.customer_phone)),
@@ -88,11 +104,12 @@ export default function Returns() {
     <div>
       <PageHeader
         title="Sales Returns"
-        subtitle="Corrections are issued as immutable credit notes — invoices are never edited"
+        subtitle="A sales return issues a credit note. The original invoice stays finalized and is not cancelled."
         actions={
           <div className="row">
             <ExportButtons title="Sales returns" columns={[
               { key: "note_no", label: "Credit Note #" }, { key: "date", label: "Date" },
+              { key: "branch_name", label: "Branch" },
               { key: "invoice_no", label: "Invoice #" }, { key: "customer_name", label: "Farmer" },
               { key: "customer_village", label: "Village" }, { key: "customer_phone", label: "Phone" },
               { key: "reason", label: "Reason" },
@@ -103,13 +120,22 @@ export default function Returns() {
         }
       />
       <Card>
-        <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
-          <SearchInput value={q} onChange={setQ} placeholder="Search note #, invoice, reason…" />
+        <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+          <SearchInput value={q} onChange={setQ} placeholder="Search note #, invoice, farmer…" />
+          <BranchSelect value={branchId} onChange={setBranchId} branches={branches} allowAll={allBranches} />
+          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} style={{ width: "auto" }} title="Return date" />
+          {day !== todayISO() && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDay(todayISO())}>Today</button>
+          )}
+          {day && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDay("")}>All dates</button>
+          )}
         </div>
         <Table
           columns={[
             { key: "note_no", label: "Credit Note #" },
             { key: "date", label: "Date" },
+            { key: "branch_name", label: "Branch", render: (r: any) => r.branch_name || "—" },
             { key: "invoice_no", label: "Invoice #", render: (r: any) => r.invoice_no || `#${r.invoice_id}` },
             { key: "customer_name", label: "Farmer", render: (r: any) => r.customer_name || "—" },
             { key: "customer_village", label: "Village", render: (r: any) => r.customer_village || "—" },
@@ -118,7 +144,7 @@ export default function Returns() {
             { key: "total", label: "Amount", num: true, render: (r) => <strong>{inr(r.total)}</strong> },
           ]}
           rows={filtered}
-          empty={rows.length ? "No credit notes match the search" : "No credit notes yet"}
+          empty={rows.length ? "No credit notes match the search" : day ? "No sales returns on this date" : "No credit notes yet"}
           pageSize={50}
         />
       </Card>
@@ -157,7 +183,8 @@ export default function Returns() {
               {invoice.customer_village ? ` · ${invoice.customer_village}` : ""}
               {invoice.customer_phone ? ` · ${invoice.customer_phone}` : ""}
               {" · "}{invoice.payment_mode} · {inr(invoice.grand_total)}
-              {invoice.payment_mode !== "cash" ? " · Credit bill — return posts a credit note against this invoice" : ""}
+              {" · Invoice stays "}{invoice.status || "finalized"}
+              {". The credit note reduces this farmer's khata and shows on their ledger."}
             </p>
           )}
           {invoice && !loadingInvoice && (

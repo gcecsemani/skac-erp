@@ -244,7 +244,14 @@ export const api = {
   syncInvoices: (invoices: any[]) => post<any[]>("/sales/sync", { invoices }),
 
   // returns
-  creditNotes: () => get<any[]>("/returns"),
+  creditNotes: (opts?: { branchId?: number; on?: string; search?: string }) => {
+    const p = new URLSearchParams();
+    if (opts?.branchId) p.set("branch_id", String(opts.branchId));
+    if (opts?.on) p.set("on", opts.on);
+    if (opts?.search) p.set("search", opts.search);
+    const q = p.toString();
+    return get<any[]>(`/returns${q ? `?${q}` : ""}`);
+  },
   createCreditNote: (c: any) => post("/returns", c),
 
   // purchasing

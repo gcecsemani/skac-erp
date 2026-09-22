@@ -36,7 +36,7 @@ const REPORTS: ReportDef[] = [
   { key: "khata_by_village", label: "Khata by village", group: "collections", needsDates: true,
     blurb: "The same khata movement rolled up by village. Use this to see which villages carry the most outstanding." },
   { key: "inactive_khata", label: "Khata not visiting", group: "collections", needsDates: false,
-    blurb: "Farmers who owe money and have not billed in 30 days. These balances go stale unless you follow up." },
+    blurb: "Farmers who still owe the selected shop and have not billed there in 30 days. Outstanding is that shop's khata: billed minus collected minus sales returns." },
   { key: "payment_collection", label: "Money collected", group: "collections", needsDates: true,
     blurb: "Cash, UPI and khata receipts in the period. Match this to day close and the bank." },
   { key: "purchase", label: "Purchases", group: "buying", needsDates: true,
@@ -120,7 +120,7 @@ export default function Reports() {
   const inGroup = useMemo(() => REPORTS.filter((r) => r.group === group), [group]);
   const isRecon = key === "stock_reconcile";
   const isVendorStock = key === "vendor_stock";
-  const isKhata = key === "customer_outstanding" || key === "khata_by_village";
+  const isKhata = key === "customer_outstanding" || key === "khata_by_village" || key === "inactive_khata";
 
   const reload = () => api.runReport(key, {
     branchId: branchId || undefined, start, end,
