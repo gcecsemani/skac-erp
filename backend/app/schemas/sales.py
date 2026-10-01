@@ -18,6 +18,11 @@ class InvoiceLineIn(BaseModel):
     unit: str | None = None
 
 
+class TenderIn(BaseModel):
+    mode: str
+    amount: Decimal = Field(gt=0)
+
+
 class InvoiceCreate(BaseModel):
     branch_id: int
     customer_id: int | None = None
@@ -25,8 +30,17 @@ class InvoiceCreate(BaseModel):
     tax_type: TaxType = TaxType.intra
     invoice_date: date | None = None
     amount_paid: Decimal = Field(default=Decimal("0"), ge=0)
+    # Amounts collected now. Omit to keep the single payment_mode + amount_paid path.
+    tenders: list[TenderIn] | None = None
     client_uuid: str | None = None
     lines: list[InvoiceLineIn] = Field(min_length=1)
+
+
+class TenderOut(BaseModel):
+    mode: str
+    amount: Decimal
+
+    model_config = {"from_attributes": True}
 
 
 class InvoiceItemOut(BaseModel):
@@ -74,6 +88,8 @@ class InvoiceOut(BaseModel):
     status: InvoiceStatus
     tax_type: TaxType
     payment_mode: PaymentMode
+    payment_summary: str = ""
+    tenders: list[TenderOut] = Field(default_factory=list)
     subtotal: Decimal
     discount_total: Decimal
     tax_total: Decimal

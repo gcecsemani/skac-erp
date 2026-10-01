@@ -18,6 +18,7 @@ TRUNCATE TABLE field_visit_photo;
 TRUNCATE TABLE purchase_return_item;
 TRUNCATE TABLE credit_note_item;
 TRUNCATE TABLE invoice_item;
+TRUNCATE TABLE invoice_tender;
 TRUNCATE TABLE stock_transfer_item;
 TRUNCATE TABLE purchase_order_item;
 TRUNCATE TABLE journal_line;

@@ -32,7 +32,7 @@ from app.models.purchase import (
     VendorPayment,
 )
 from app.models.returns import CreditNote, CreditNoteItem
-from app.models.sales import Invoice, InvoiceItem
+from app.models.sales import Invoice, InvoiceItem, InvoiceTender
 from app.models.transfer import StockTransfer, StockTransferItem
 from app.models.user import Role, User, user_branch
 from app.models.vendor import Vendor
@@ -57,6 +57,7 @@ __all__ = [
     "ProductUnit",
     "Invoice",
     "InvoiceItem",
+    "InvoiceTender",
     "Role",
     "User",
     "user_branch",

@@ -13,11 +13,12 @@ from app.models.customer import Customer
 from app.models.enums import InvoiceStatus, MovementType, PaymentMode, TaxType
 from app.models.organization import Branch
 from app.models.product import Product
-from app.models.sales import Invoice, InvoiceItem
+from app.models.sales import Invoice, InvoiceItem, InvoiceTender
 from app.services import accounting, inventory
 
 TWOPLACES = Decimal("0.01")
 MAX_INVOICE_NO_PROBES = 50
+TENDER_MODES = {"cash", "upi", "card"}
 
 
 @dataclass
@@ -39,8 +40,42 @@ class InvoiceInput:
     # None = paid in full at the counter. 0 (or any amount < grand_total) is
     # a credit / partial sale and requires a farmer with khata allowed.
     amount_paid: Decimal | None = None
+    # When set, these are the amounts received now (cash / UPI / card).
+    # Their sum is amount_paid. Anything left is khata. Empty list = full credit.
+    tenders: list[tuple[str, Decimal]] | None = None
     client_uuid: str | None = None
     lines: list[LineInput] = None  # type: ignore[assignment]
+
+
+def _apply_tenders(db: Session, invoice: Invoice, tenders, grand_total: Decimal):
+    """Record split tenders. Returns the rows, or None when the caller did not send any."""
+    if tenders is None:
+        return None
+    cleaned: list[tuple[str, Decimal]] = []
+    for mode, amount in tenders:
+        mode_s = str(mode).strip().lower()
+        amt = Decimal(amount).quantize(TWOPLACES)
+        if amt == 0:
+            continue
+        if amt < 0:
+            raise ValueError("Amount received cannot be negative")
+        if mode_s not in TENDER_MODES:
+            raise ValueError(f"Payment mode '{mode_s}' cannot be collected at the counter")
+        cleaned.append((mode_s, amt))
+    paid = sum((amt for _, amt in cleaned), Decimal("0")).quantize(TWOPLACES)
+    if paid > grand_total:
+        raise ValueError("Amount received cannot exceed invoice total")
+    invoice.amount_paid = paid
+    modes = {mode for mode, _ in cleaned}
+    if not cleaned:
+        invoice.payment_mode = PaymentMode.credit
+    elif len(modes) == 1:
+        invoice.payment_mode = PaymentMode(cleaned[0][0])
+    else:
+        invoice.payment_mode = PaymentMode.mixed
+    for mode_s, amt in cleaned:
+        db.add(InvoiceTender(invoice_id=invoice.id, mode=mode_s, amount=amt))
+    return cleaned
 
 
 def _next_invoice_no(db: Session, branch: Branch) -> str:
@@ -223,12 +258,15 @@ def create_and_finalize(
     invoice.tax_total = tax_total.quantize(TWOPLACES)
     invoice.grand_total = grand_total
 
-    paid = grand_total if data.amount_paid is None else Decimal(data.amount_paid).quantize(TWOPLACES)
-    if paid < 0:
-        raise ValueError("Amount paid cannot be negative")
-    if paid > grand_total:
-        raise ValueError("Amount paid cannot exceed invoice total")
-    invoice.amount_paid = paid
+    tender_rows = _apply_tenders(db, invoice, data.tenders, grand_total)
+    if tender_rows is None:
+        paid = grand_total if data.amount_paid is None else Decimal(data.amount_paid).quantize(TWOPLACES)
+        if paid < 0:
+            raise ValueError("Amount paid cannot be negative")
+        if paid > grand_total:
+            raise ValueError("Amount paid cannot exceed invoice total")
+        invoice.amount_paid = paid
+    paid = invoice.amount_paid
 
     invoice.invoice_no = _next_invoice_no(db, branch)
 
@@ -256,6 +294,7 @@ def create_and_finalize(
         entry_date=invoice.invoice_date, invoice_id=invoice.id,
         taxable=invoice.subtotal, tax=invoice.tax_total,
         grand_total=invoice.grand_total, amount_paid=invoice.amount_paid,
+        tenders=tender_rows,
     )
 
     return invoice

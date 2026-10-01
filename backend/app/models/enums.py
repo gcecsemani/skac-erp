@@ -31,6 +31,7 @@ class PaymentMode(str, enum.Enum):
     credit = "credit"
     upi = "upi"
     card = "card"
+    mixed = "mixed"  # more than one amount received now (cash + UPI, etc.)
 
 
 class TaxType(str, enum.Enum):

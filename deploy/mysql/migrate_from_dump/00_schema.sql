@@ -303,7 +303,7 @@ CREATE TABLE IF NOT EXISTS invoice (
 	invoice_date DATE NOT NULL, 
 	status ENUM('draft','finalized','cancelled') NOT NULL, 
 	tax_type ENUM('intra','inter') NOT NULL, 
-	payment_mode ENUM('cash','credit','upi','card') NOT NULL, 
+	payment_mode ENUM('cash','credit','upi','card','mixed') NOT NULL, 
 	subtotal NUMERIC(14, 2) NOT NULL, 
 	discount_total NUMERIC(14, 2) NOT NULL, 
 	tax_total NUMERIC(14, 2) NOT NULL, 
@@ -320,6 +320,18 @@ CREATE TABLE IF NOT EXISTS invoice (
 	FOREIGN KEY(branch_id) REFERENCES branch (id), 
 	FOREIGN KEY(customer_id) REFERENCES customer (id), 
 	FOREIGN KEY(created_by_user_id) REFERENCES `user` (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS invoice_tender (
+	invoice_id BIGINT NOT NULL, 
+	mode VARCHAR(20) NOT NULL, 
+	amount NUMERIC(14, 2) NOT NULL, 
+	id BIGINT NOT NULL AUTO_INCREMENT, 
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+	PRIMARY KEY (id), 
+	KEY ix_invoice_tender_invoice_id (invoice_id), 
+	FOREIGN KEY(invoice_id) REFERENCES invoice (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS journal_entry (
@@ -428,6 +440,9 @@ CREATE TABLE IF NOT EXISTS credit_note (
 	note_date DATE NOT NULL, 
 	reason VARCHAR(255), 
 	total NUMERIC(14, 2) NOT NULL, 
+	khata_amount NUMERIC(14, 2) NOT NULL DEFAULT 0, 
+	refund_amount NUMERIC(14, 2) NOT NULL DEFAULT 0, 
+	refund_mode VARCHAR(20), 
 	id BIGINT NOT NULL AUTO_INCREMENT, 
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 

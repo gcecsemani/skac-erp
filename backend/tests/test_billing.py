@@ -187,3 +187,48 @@ def test_client_uuid_is_idempotent(db, org, branch, make_product, receive):
         select(func.sum(Stock.quantity)).where(Stock.product_id == p.id)
     )
     assert on_hand == Decimal("9.000")
+
+
+def test_mixed_tender_posts_cash_upi_and_khata(db, org, branch, make_product, receive):
+    from app.models.accounting import JournalEntry, JournalLine, LedgerAccount
+    from app.models.customer import Customer
+    from app.models.enums import PaymentMode
+    from app.models.sales import InvoiceTender
+
+    farmer = Customer(
+        organization_id=org.id, name="Ravi", phone="9000000991",
+        credit_allowed=True, outstanding_balance=Decimal("0"),
+    )
+    db.add(farmer)
+    db.flush()
+    p = make_product(sale_price="500", gst_rate="0", sku="MIX1")
+    receive(p, "B1", 5)
+
+    inv = _finalize(
+        db, org, branch,
+        [billing.LineInput(product_id=p.id, quantity=Decimal("1"))],
+        customer_id=farmer.id,
+        tenders=[("cash", Decimal("100")), ("upi", Decimal("200"))],
+    )
+    db.flush()
+
+    assert inv.grand_total == Decimal("500.00")
+    assert inv.amount_paid == Decimal("300.00")
+    assert inv.payment_mode is PaymentMode.mixed
+    assert farmer.outstanding_balance == Decimal("200.00")
+    tenders = db.scalars(select(InvoiceTender).where(InvoiceTender.invoice_id == inv.id)).all()
+    assert sorted((t.mode, t.amount) for t in tenders) == [
+        ("cash", Decimal("100.00")),
+        ("upi", Decimal("200.00")),
+    ]
+
+    posted = db.execute(
+        select(LedgerAccount.code, JournalLine.debit, JournalLine.credit)
+        .join(JournalLine, JournalLine.account_id == LedgerAccount.id)
+        .join(JournalEntry, JournalEntry.id == JournalLine.entry_id)
+        .where(JournalEntry.ref_type == "invoice", JournalEntry.ref_id == inv.id)
+    ).all()
+    by_code = {code: (debit, credit) for code, debit, credit in posted}
+    assert by_code["1000"][0] == Decimal("100.00")
+    assert by_code["1010"][0] == Decimal("200.00")
+    assert by_code["1200"][0] == Decimal("200.00")

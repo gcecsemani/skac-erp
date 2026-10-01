@@ -595,12 +595,24 @@ def customer_ledger(
         detail = f"Against {inv_no}" if inv_no else "Sales return"
         if note.reason:
             detail = f"{detail} · {note.reason}"
+        khata_part = Decimal(note.khata_amount or 0)
+        refund_part = Decimal(note.refund_amount or 0)
+        # Older notes reduced khata by the full return and have both splits at 0.
+        if khata_part == 0 and refund_part == 0:
+            credited = Decimal(note.total or 0)
+        else:
+            credited = khata_part
+            if refund_part > 0:
+                how = note.refund_mode or "cash"
+                detail = f"{detail} · refunded ₹{refund_part} {how}"
+            if khata_part > 0:
+                detail = f"{detail} · khata reduced ₹{khata_part}"
         entries.append({
             "kind": "return",
             "date": note.note_date.isoformat(),
             "ref": note.note_no,
             "debit": 0,
-            "credit": float(note.total),
+            "credit": float(credited),
             "note": detail,
         })
 

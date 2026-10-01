@@ -3,6 +3,14 @@ export const inr = (n: number | string | null | undefined) => {
   return "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 };
 
+/** Positive = farmer owes the shop. Negative = shop owes the farmer (credit balance). */
+export function khataText(n: number | string | null | undefined): string {
+  const v = Number(n ?? 0);
+  if (!Number.isFinite(v)) return inr(0);
+  if (v < -0.004) return `Credit ${inr(Math.abs(v))}`;
+  return inr(v);
+}
+
 const ONES = [
   "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
   "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",

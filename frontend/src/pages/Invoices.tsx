@@ -134,7 +134,7 @@ export default function Invoices() {
             { key: "customer_name", label: "Farmer", render: (r) => r.customer_name || <span className="muted">Walk-in</span> },
             { key: "customer_village", label: "Village", render: (r) => r.customer_village || "—" },
             { key: "customer_phone", label: "Phone", render: (r) => r.customer_phone || "—" },
-            { key: "payment_mode", label: "Payment", render: (r) => <span style={{ textTransform: "capitalize" }}>{r.payment_mode}</span> },
+            { key: "payment_mode", label: "Payment", render: (r) => <span style={{ textTransform: "capitalize" }}>{r.payment_summary || r.payment_mode}</span> },
             { key: "status", label: "Status", render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge> },
             { key: "discount_total", label: "Discount", num: true, render: (r) => Number(r.discount_total) > 0 ? inr(r.discount_total) : "—" },
             { key: "grand_total", label: "Total", num: true, render: (r) => <strong>{inr(r.grand_total)}</strong> },
@@ -167,7 +167,7 @@ export default function Invoices() {
                 <div className="muted" style={{ fontSize: 12 }}>{[sel.customer_village, sel.customer_phone].filter(Boolean).join(" · ")}</div>
               )}
             </div>
-            <div><div className="muted">Payment</div><strong style={{ textTransform: "capitalize" }}>{sel.payment_mode}</strong></div>
+            <div><div className="muted">Payment</div><strong style={{ textTransform: "capitalize" }}>{sel.payment_summary || sel.payment_mode}</strong></div>
             <div><div className="muted">Discount</div><strong>{inr(sel.discount_total)}</strong></div>
             <div><div className="muted">Total</div><strong>{inr(sel.grand_total)}</strong></div>
             <div><div className="muted">Paid</div><strong>{inr(sel.amount_paid)}</strong></div>

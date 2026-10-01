@@ -73,6 +73,9 @@ class Invoice(Base, PKMixin, TimestampMixin):
     items: Mapped[list["InvoiceItem"]] = relationship(
         back_populates="invoice", cascade="all, delete-orphan"
     )
+    tenders: Mapped[list["InvoiceTender"]] = relationship(
+        back_populates="invoice", cascade="all, delete-orphan"
+    )
     branch: Mapped["Branch"] = relationship("Branch", foreign_keys=[branch_id], viewonly=True)
     customer: Mapped["Customer | None"] = relationship("Customer", foreign_keys=[customer_id], viewonly=True)
 
@@ -106,3 +109,17 @@ class InvoiceItem(Base, PKMixin, TimestampMixin):
     line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
 
     invoice: Mapped["Invoice"] = relationship(back_populates="items")
+
+
+class InvoiceTender(Base, PKMixin, TimestampMixin):
+    """Money taken at the counter, split by mode. The unpaid remainder is khata."""
+
+    __tablename__ = "invoice_tender"
+
+    invoice_id: Mapped[int] = mapped_column(
+        ForeignKey("invoice.id"), nullable=False, index=True
+    )
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+
+    invoice: Mapped["Invoice"] = relationship(back_populates="tenders")

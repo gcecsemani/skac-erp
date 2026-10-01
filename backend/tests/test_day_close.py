@@ -6,7 +6,8 @@ from app.models.customer import Customer, CustomerPayment
 from app.models.enums import InvoiceStatus, PaymentMode
 from app.models.expense import Expense
 from app.models.organization import Branch
-from app.models.sales import Invoice
+from app.models.returns import CreditNote
+from app.models.sales import Invoice, InvoiceTender
 from app.services.day_close import compute_expected
 
 # `_payment_shop_date` reinterprets a naive timestamp as UTC when it lands on
@@ -156,6 +157,35 @@ def test_expenses_reduce_expected_cash(db, org, branch):
     assert r["expense_total"] == Decimal("300.00")
     assert r["cash_out"] == Decimal("300.00")
     assert r["expected_cash"] == Decimal("700.00")
+
+
+def test_split_tender_lands_in_cash_and_digital(db, org, branch):
+    inv = _invoice(db, org, branch, "500", "300", PaymentMode.mixed)
+    db.add(InvoiceTender(invoice_id=inv.id, mode="cash", amount=Decimal("100")))
+    db.add(InvoiceTender(invoice_id=inv.id, mode="upi", amount=Decimal("200")))
+    db.flush()
+
+    r = _expected(db, org, branch)
+    assert r["cash_in"] == Decimal("100.00")
+    assert r["digital_in"] == Decimal("200.00")
+    assert r["collected_total"] == Decimal("300.00")
+    assert r["khata_new"] == Decimal("200.00")
+    assert r["sales_total"] == Decimal("500.00")
+
+
+def test_sale_return_refund_leaves_the_till(db, org, branch):
+    inv = _invoice(db, org, branch, "1000", "1000", PaymentMode.cash)
+    db.add(CreditNote(
+        organization_id=org.id, branch_id=branch.id, invoice_id=inv.id,
+        note_date=CLOSE, total=Decimal("200"),
+        khata_amount=Decimal("0"), refund_amount=Decimal("200"), refund_mode="cash",
+    ))
+    db.flush()
+
+    r = _expected(db, org, branch)
+    assert r["cash_in"] == Decimal("1000.00")
+    assert r["cash_out"] == Decimal("200.00")
+    assert r["expected_cash"] == Decimal("800.00")
 
 
 def test_empty_day_reconciles_to_zero(db, org, branch):

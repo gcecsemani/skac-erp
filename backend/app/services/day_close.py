@@ -14,7 +14,8 @@ from app.models.enums import InvoiceStatus
 from app.models.expense import Expense
 from app.models.organization import Branch
 from app.models.purchase import VendorPayment
-from app.models.sales import Invoice
+from app.models.returns import CreditNote
+from app.models.sales import Invoice, InvoiceTender
 
 TWO = Decimal("0.01")
 DIGITAL = {"upi", "card", "bank"}
@@ -116,6 +117,20 @@ def compute_expected(
 
     # Roll the day's bills up in SQL, grouped by payment mode; only the three
     # money columns are needed, not whole Invoice rows.
+    day_bills = (
+        Invoice.organization_id == org_id,
+        Invoice.branch_id == branch_id,
+        Invoice.status == InvoiceStatus.finalized,
+        Invoice.invoice_date == close_date,
+    )
+    # Split tenders are counted on their own so cash + UPI on one bill
+    # land in the right till buckets.
+    has_tender = (
+        select(InvoiceTender.id)
+        .where(InvoiceTender.invoice_id == Invoice.id)
+        .correlate(Invoice)
+        .exists()
+    )
     inv_rows = db.execute(
         select(
             Invoice.payment_mode,
@@ -123,12 +138,15 @@ def compute_expected(
             func.coalesce(func.sum(Invoice.grand_total), 0),
             func.coalesce(func.sum(Invoice.amount_paid), 0),
         )
-        .where(
-            Invoice.organization_id == org_id,
-            Invoice.branch_id == branch_id,
-            Invoice.status == InvoiceStatus.finalized,
-            Invoice.invoice_date == close_date,
+        .where(*day_bills)
+        .group_by(Invoice.payment_mode)
+    ).all()
+    plain_rows = db.execute(
+        select(
+            Invoice.payment_mode,
+            func.coalesce(func.sum(Invoice.amount_paid), 0),
         )
+        .where(*day_bills, ~has_tender)
         .group_by(Invoice.payment_mode)
     ).all()
 
@@ -142,11 +160,25 @@ def compute_expected(
         bills += int(count or 0)
         sales += total
         khata_new += total - paid
+    for mode, paid_total in plain_rows:
         # Credit bills are unpaid at the till. Later farmer receipts are
         # CustomerPayment rows (khata_collected). Do not treat amount_paid
         # that was allocated onto a credit invoice as cash taken at billing.
         if _mode_str(mode) == "credit":
             continue
+        paid = _n(paid_total)
+        collected_inv += paid
+        if paid > 0:
+            _add(in_by, _bucket(mode), paid)
+
+    tender_rows = db.execute(
+        select(InvoiceTender.mode, func.coalesce(func.sum(InvoiceTender.amount), 0))
+        .join(Invoice, Invoice.id == InvoiceTender.invoice_id)
+        .where(*day_bills)
+        .group_by(InvoiceTender.mode)
+    ).all()
+    for mode, paid_total in tender_rows:
+        paid = _n(paid_total)
         collected_inv += paid
         if paid > 0:
             _add(in_by, _bucket(mode), paid)
@@ -215,6 +247,21 @@ def compute_expected(
                 _add(out_by, _bucket(p.mode), amt)
             else:
                 unscoped_out += amt
+
+    refund_rows = db.execute(
+        select(CreditNote.refund_mode, func.coalesce(func.sum(CreditNote.refund_amount), 0))
+        .where(
+            CreditNote.organization_id == org_id,
+            CreditNote.branch_id == branch_id,
+            CreditNote.note_date == close_date,
+            CreditNote.refund_amount > 0,
+        )
+        .group_by(CreditNote.refund_mode)
+    ).all()
+    for mode, amt in refund_rows:
+        refunded = _n(amt)
+        if refunded > 0:
+            _add(out_by, _bucket(mode or "cash"), refunded)
 
     prev = db.scalar(
         select(DayClose)

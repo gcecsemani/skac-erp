@@ -101,6 +101,10 @@ export function printThermalReceipt(inv: any) {
     inv.branch_pesticide_license && `Pest. ${esc(inv.branch_pesticide_license)}`,
     inv.branch_seed_license && `Seed ${esc(inv.branch_seed_license)}`,
   ].filter(Boolean).join(" · ");
+  const tenders: { mode: string; amount: number }[] = Array.isArray(inv.tenders) ? inv.tenders : [];
+  const paidRows = tenders.length
+    ? tenders.map((t) => `<tr><td>Paid (${esc(t.mode)})</td><td class="r">${Number(t.amount).toFixed(2)}</td></tr>`).join("")
+    : `<tr><td>Paid (${esc(inv.payment_mode)})</td><td class="r">${Number(inv.amount_paid).toFixed(2)}</td></tr>`;
   const hint = inv.printer_name
     ? `<div class="hint">Select printer: <strong>${esc(inv.printer_name)}</strong></div>`
     : `<div class="hint">Choose this branch thermal printer in the print dialog.</div>`;
@@ -149,7 +153,7 @@ ${inv.customer_village ? `<div class="muted">${esc(inv.customer_village)}</div>`
   ${Number(inv.discount_total) > 0 ? `<tr><td>Discount</td><td class="r">- ${Number(inv.discount_total).toFixed(2)}</td></tr>` : ""}
   <tr><td>GST</td><td class="r">${Number(inv.tax_total).toFixed(2)}</td></tr>
   <tr class="tot"><td>TOTAL</td><td class="r">${inr(inv.grand_total).replace("₹", "Rs. ")}</td></tr>
-  <tr><td>Paid (${esc(inv.payment_mode)})</td><td class="r">${Number(inv.amount_paid).toFixed(2)}</td></tr>
+  ${paidRows}
   ${due > 0.005 ? `<tr class="tot"><td>Balance (khata)</td><td class="r">${due.toFixed(2)}</td></tr>` : ""}
 </table>
 <hr>

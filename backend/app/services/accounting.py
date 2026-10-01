@@ -94,12 +94,22 @@ def post_entry(
 
 
 # --- Posting rules for source documents ---
+def _cash_account(mode: str | None) -> str:
+    return "1010" if str(mode or "") in ("bank", "upi", "card") else "1000"
+
+
 def post_sale(db, *, organization_id, branch_id, entry_date, invoice_id,
-              taxable, tax, grand_total, amount_paid) -> None:
+              taxable, tax, grand_total, amount_paid, tenders=None) -> None:
     paid = Decimal(amount_paid)
     on_credit = Decimal(grand_total) - paid
     lines = []
-    if paid > 0:
+    if tenders:
+        for mode, amt in tenders:
+            amt = Decimal(amt)
+            if amt <= 0:
+                continue
+            lines.append((_cash_account(mode), amt, Decimal("0")))
+    elif paid > 0:
         lines.append(("1000", paid, Decimal("0")))          # Dr Cash
     if on_credit > 0:
         lines.append(("1200", on_credit, Decimal("0")))     # Dr Debtors
@@ -196,11 +206,21 @@ def post_purchase_return(db, *, organization_id, branch_id, entry_date, purchase
 
 
 def post_credit_note(db, *, organization_id, branch_id, entry_date, credit_note_id,
-                     taxable, tax, total) -> None:
+                     taxable, tax, total, khata_amount=None, refund_amount=None,
+                     refund_mode: str = "cash") -> None:
+    """Reverse a sale. Unpaid value credits debtors; collected value leaves the till."""
+    total = Decimal(total)
+    khata = total if khata_amount is None else Decimal(khata_amount)
+    refund = Decimal("0") if refund_amount is None else Decimal(refund_amount)
     lines = [("3000", Decimal(taxable), Decimal("0"))]              # Dr Sales (reverse)
     if Decimal(tax) > 0:
         lines.append(("2100", Decimal(tax), Decimal("0")))         # Dr GST Payable
-    lines.append(("1200", Decimal("0"), Decimal(total)))           # Cr Debtors
+    if khata > 0:
+        lines.append(("1200", Decimal("0"), Decimal(khata)))       # Cr Debtors
+    if refund > 0:
+        lines.append((_cash_account(refund_mode), Decimal("0"), Decimal(refund)))
+    if khata <= 0 and refund <= 0:
+        lines.append(("1200", Decimal("0"), Decimal(total)))
     post_entry(db, organization_id=organization_id, branch_id=branch_id,
                entry_date=entry_date, narration="Sales return (credit note)",
                ref_type="credit_note", ref_id=credit_note_id, lines=lines)

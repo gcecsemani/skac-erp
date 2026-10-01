@@ -26,6 +26,11 @@ class CreditNote(Base, PKMixin, TimestampMixin):
     note_date: Mapped[date] = mapped_column(Date, nullable=False)
     reason: Mapped[str | None] = mapped_column(String(255))
     total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    # Unpaid portion reduces khata. Already-collected money is a till refund
+    # and must not push outstanding below zero.
+    khata_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    refund_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    refund_mode: Mapped[str | None] = mapped_column(String(20))
 
     items: Mapped[list["CreditNoteItem"]] = relationship(
         back_populates="credit_note", cascade="all, delete-orphan"

@@ -33,6 +33,29 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 
+def _allow_mixed_payment_mode() -> None:
+    """MySQL stores payment_mode as an ENUM. SQLite stores it as text."""
+    if engine.dialect.name != "mysql":
+        return
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoice' "
+                "AND COLUMN_NAME = 'payment_mode'"
+            )).first()
+            if row is None:
+                return
+            col = str(row[0]).lower()
+            if col.startswith("enum") and "mixed" not in col:
+                conn.execute(text(
+                    "ALTER TABLE invoice MODIFY COLUMN payment_mode "
+                    "ENUM('cash','credit','upi','card','mixed') NOT NULL"
+                ))
+    except Exception:
+        return
+
+
 @app.on_event("startup")
 def _ensure_schema() -> None:
     """Create any missing tables/columns/indexes (local SQLite / first-run convenience)."""
@@ -74,6 +97,10 @@ def _ensure_schema() -> None:
     add_column("vendor_payment", "reversed_at", "reversed_at DATETIME")
     add_column("vendor_payment", "reversed_by_user_id", "reversed_by_user_id BIGINT")
     add_column("vendor_payment", "reversal_reason", "reversal_reason VARCHAR(255)")
+    add_column("credit_note", "khata_amount", "khata_amount NUMERIC(14, 2) NOT NULL DEFAULT 0")
+    add_column("credit_note", "refund_amount", "refund_amount NUMERIC(14, 2) NOT NULL DEFAULT 0")
+    add_column("credit_note", "refund_mode", "refund_mode VARCHAR(20)")
+    _allow_mixed_payment_mode()
     add_index("customer", "ix_customer_aadhaar_no", "aadhaar_no")
     add_index("customer", "ix_customer_name", "name")
     add_index("customer", "ix_customer_org_name", "organization_id, name")

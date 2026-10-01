@@ -25,6 +25,47 @@ from app.services import accounting, inventory as inv
 router = APIRouter(prefix="/returns", tags=["returns"])
 
 TWO = Decimal("0.01")
+DIGITAL_REFUND = {"upi", "card", "bank"}
+
+
+def split_return_amounts(
+    *,
+    grand_total: Decimal,
+    amount_paid: Decimal,
+    prior_credits: Decimal,
+    return_total: Decimal,
+    outstanding: Decimal | None,
+) -> tuple[Decimal, Decimal]:
+    """Split a return into khata reduction and a till refund.
+
+    Outstanding stays at or above zero. Money the farmer already paid is
+    refunded instead of being stored as a negative balance.
+    """
+    unpaid = (Decimal(grand_total) - Decimal(amount_paid) - Decimal(prior_credits)).quantize(TWO)
+    if unpaid < 0:
+        unpaid = Decimal("0")
+    if outstanding is None:
+        khata = Decimal("0")
+    else:
+        room = Decimal(outstanding) if Decimal(outstanding) > 0 else Decimal("0")
+        khata = min(Decimal(return_total), unpaid, room)
+    khata = khata.quantize(TWO)
+    refund = (Decimal(return_total) - khata).quantize(TWO)
+    return khata, refund
+
+
+def _refund_mode(invoice: Invoice) -> str:
+    mode = invoice.payment_mode.value if hasattr(invoice.payment_mode, "value") else str(invoice.payment_mode or "")
+    mode = mode.lower()
+    tenders = list(getattr(invoice, "tenders", None) or [])
+    kinds = {str(t.mode).lower() for t in tenders if Decimal(t.amount or 0) > 0}
+    if kinds == {"upi"} or (not kinds and mode == "upi"):
+        return "upi"
+    if kinds == {"card"} or (not kinds and mode == "card"):
+        return "card"
+    if mode in DIGITAL_REFUND and (not kinds or kinds == {mode}):
+        return mode
+    return "cash"
 
 
 class ReturnItemIn(BaseModel):
@@ -143,18 +184,38 @@ def create_credit_note(
         CreditNote.organization_id == current.organization_id)) or 0
     note.note_no = f"CN/{date.today().year}/{count:05d}"
 
-    # Reduce farmer outstanding + reverse the ledger.
-    if invoice.customer_id:
-        customer = db.get(Customer, invoice.customer_id)
-        if customer is not None:
-            customer.outstanding_balance = customer.outstanding_balance - total
+    prior = db.scalar(select(func.coalesce(func.sum(CreditNote.total), 0)).where(
+        CreditNote.invoice_id == invoice.id, CreditNote.id != note.id,
+    )) or Decimal("0")
+    customer = db.get(Customer, invoice.customer_id) if invoice.customer_id else None
+    khata, refund = split_return_amounts(
+        grand_total=invoice.grand_total,
+        amount_paid=invoice.amount_paid,
+        prior_credits=Decimal(prior),
+        return_total=total,
+        outstanding=None if customer is None else Decimal(customer.outstanding_balance or 0),
+    )
+    note.khata_amount = khata
+    note.refund_amount = refund
+    note.refund_mode = _refund_mode(invoice) if refund > 0 else None
+    if customer is not None and khata > 0:
+        customer.outstanding_balance = (Decimal(customer.outstanding_balance or 0) - khata).quantize(TWO)
     accounting.post_credit_note(
         db, organization_id=current.organization_id, branch_id=invoice.branch_id,
         entry_date=note.note_date, credit_note_id=note.id,
-        taxable=taxable_total, tax=tax_total, total=total)
+        taxable=taxable_total, tax=tax_total, total=total,
+        khata_amount=khata, refund_amount=refund, refund_mode=note.refund_mode or "cash")
 
     record_audit(db, action="create", entity_type="credit_note", entity_id=note.id,
                  actor_user_id=current.id, organization_id=current.organization_id,
                  branch_id=invoice.branch_id, changes={"total": str(total)})
     db.commit()
-    return {"id": note.id, "note_no": note.note_no, "total": float(total)}
+    return {
+        "id": note.id,
+        "note_no": note.note_no,
+        "total": float(total),
+        "khata_amount": float(khata),
+        "refund_amount": float(refund),
+        "refund_mode": note.refund_mode,
+        "outstanding_balance": float(customer.outstanding_balance) if customer is not None else None,
+    }

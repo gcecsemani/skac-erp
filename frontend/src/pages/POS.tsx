@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, Trash2, Wifi, WifiOff, RefreshCw, CreditCard, CheckCircle2, User, X, UserPlus, Star, Printer, History } from "lucide-react";
 import { api } from "../api";
-import { CATEGORY_COLORS, billedToStock, formatPackStock, inr, lastBillLabel, loosePrice, num, packInfo, saleUnit } from "../format";
+import { CATEGORY_COLORS, billedToStock, formatPackStock, inr, khataText, lastBillLabel, loosePrice, num, packInfo, saleUnit } from "../format";
 import { printThermalReceipt } from "../print";
 import { Card, PageHeader, Badge, Modal, Field, Switch } from "../components/ui";
-import { LocationFields, PaymentSelect } from "../components/configFields";
-import { useConfigBundle } from "../configBundle";
+import { LocationFields } from "../components/configFields";
+import { modesFor, useConfigBundle } from "../configBundle";
+import { loadPosSession, newDraftId, savePosSession, type PosDraft } from "../posDraft";
 import { getCachedCustomers, getCachedProducts, matchCustomer, pendingCount, queueInvoice, refreshCustomers, refreshProducts, syncOutbox, upsertCached } from "../offline";
 import { getOpenPrintDialog, setOpenPrintDialog } from "../printPref";
 import * as V from "../validate";
@@ -21,21 +22,22 @@ interface Line { key: string; product_id: number; name: string; quantity: number
 const lineKey = (productId: number, unit: string) => `${productId}::${unit}`;
 
 export default function POS() {
+  const [boot] = useState(loadPosSession);
   const { bundle, ready } = useConfigBundle();
   const [products, setProducts] = useState<any[]>([]);
   const [branches, setBranches] = useState<any[]>([]);
-  const [branchId, setBranchId] = useState<number>(0);
-  const [lines, setLines] = useState<Line[]>([]);
+  const [branchId, setBranchId] = useState<number>(boot.active?.branchId || 0);
+  const [lines, setLines] = useState<Line[]>(boot.active?.lines || []);
   const [search, setSearch] = useState("");
-  const [payment, setPayment] = useState("cash");
+  const [tenders, setTenders] = useState<Record<string, string>>(boot.active?.tenders || {});
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   const [farmerBook, setFarmerBook] = useState<any[]>([]);
   const [remoteFarmers, setRemoteFarmers] = useState<any[] | null>(null);
-  const [customer, setCustomer] = useState<any | null>(null);
-  const [custQuery, setCustQuery] = useState("");
+  const [customer, setCustomer] = useState<any | null>(boot.active?.customer || null);
+  const [custQuery, setCustQuery] = useState(boot.active?.customer?.name || "");
   const [custOpen, setCustOpen] = useState(false);
   const [addFarmer, setAddFarmer] = useState<any | null>(null);
   const [farmerErr, setFarmerErr] = useState("");
@@ -43,9 +45,10 @@ export default function POS() {
   const [refreshingFarmers, setRefreshingFarmers] = useState(false);
   const farmerBox = useRef<HTMLDivElement>(null);
 
-  const [discMode, setDiscMode] = useState<"inr" | "pct">("inr");
-  const [billDiscount, setBillDiscount] = useState("");
-  const [amountPaid, setAmountPaid] = useState("0");
+  const [discMode, setDiscMode] = useState<"inr" | "pct">(boot.active?.discMode || "inr");
+  const [billDiscount, setBillDiscount] = useState(boot.active?.billDiscount || "");
+  const [activeId, setActiveId] = useState(boot.active?.id || newDraftId());
+  const [held, setHeld] = useState<PosDraft[]>(boot.held || []);
   const [lastInv, setLastInv] = useState<any | null>(null);
   const [bills, setBills] = useState<any[] | null>(null);
   const [billsBusy, setBillsBusy] = useState(false);
@@ -69,7 +72,7 @@ export default function POS() {
   };
 
   useEffect(() => {
-    api.branches().then((b) => { setBranches(b); if (b[0]) setBranchId(b[0].id); }).catch(() => {});
+    api.branches().then((b) => { setBranches(b); if (b[0]) setBranchId((cur) => cur || b[0].id); }).catch(() => {});
     getCachedProducts().then((cached) => { if (cached.length) setProducts(cached); }).catch(() => {});
     getCachedCustomers().then((cached) => { if (cached.length) setFarmerBook(cached); }).catch(() => {});
     refreshCustomers({ outstandingOnly: true, limit: 400 }).then(setFarmerBook).catch(() => {});
@@ -304,13 +307,77 @@ export default function POS() {
     [totals],
   );
 
-  useEffect(() => {
-    if (payment === "credit") setAmountPaid("0");
-    else setAmountPaid(String(totals.grand));
-  }, [payment, totals.grand]);
+  const tenderModes = useMemo(() => {
+    const order = ["cash", "upi", "card"];
+    const rank = (code: string) => {
+      const i = order.indexOf(code);
+      return i === -1 ? order.length : i;
+    };
+    return modesFor(bundle, "pos")
+      .filter((m) => m.code !== "credit")
+      .sort((a, b) => rank(a.code) - rank(b.code));
+  }, [bundle]);
+  const received = r2(tenderModes.reduce((sum, m) => sum + Math.max(0, Number(tenders[m.code]) || 0), 0));
+  const overReceived = received - totals.grand > 0.009;
+  const paid = overReceived ? totals.grand : received;
+  const due = overReceived ? 0 : r2(totals.grand - paid);
 
-  const paid = Math.min(Math.max(Number(amountPaid) || 0, 0), totals.grand);
-  const due = r2(totals.grand - paid);
+  const snapshot = (): PosDraft => ({
+    id: activeId,
+    branchId,
+    customer,
+    lines,
+    tenders,
+    billDiscount,
+    discMode,
+    savedAt: Date.now(),
+  });
+
+  useEffect(() => {
+    const active = lines.length || customer ? snapshot() : null;
+    savePosSession({ active, held });
+  }, [lines, customer, tenders, billDiscount, discMode, branchId, held, activeId]);
+
+  const clearActive = () => {
+    setLines([]);
+    setCustomer(null);
+    setCustQuery("");
+    setBillDiscount("");
+    setDiscMode("inr");
+    setTenders({});
+    setActiveId(newDraftId());
+    setBills(null);
+  };
+
+  const holdCurrent = () => {
+    if (!lines.length && !customer) return;
+    const draft = snapshot();
+    setHeld((cur) => [draft, ...cur.filter((h) => h.id !== draft.id)].slice(0, 12));
+    clearActive();
+    setMsg({ text: `Held ${draft.customer?.name || "walk-in"}'s bill. Start the next farmer.`, ok: true });
+  };
+
+  const resumeHeld = (id: string) => {
+    const target = held.find((h) => h.id === id);
+    if (!target) return;
+    const current = lines.length || customer ? snapshot() : null;
+    setHeld((cur) => {
+      const rest = cur.filter((h) => h.id !== id);
+      return current ? [current, ...rest].slice(0, 12) : rest;
+    });
+    setActiveId(target.id);
+    setBranchId(target.branchId || branchId);
+    setLines(target.lines || []);
+    setCustomer(target.customer || null);
+    setCustQuery(target.customer?.name || "");
+    setTenders(target.tenders || {});
+    setBillDiscount(target.billDiscount || "");
+    setDiscMode(target.discMode || "inr");
+    setBills(null);
+    setMsg(null);
+  };
+
+  const discardHeld = (id: string) => setHeld((cur) => cur.filter((h) => h.id !== id));
   const projectedKhata = Number(customer?.outstanding_balance || 0) + due;
   const overLimit = !!customer && Number(customer.credit_limit) > 0 && projectedKhata > Number(customer.credit_limit);
 
@@ -356,11 +423,20 @@ export default function POS() {
     } catch (e: any) { setFarmerErr(e.message); }
   };
 
-  const setPayMode = (mode: string) => setPayment(mode);
+  const setTenderAmt = (code: string, value: string) => setTenders((cur) => ({ ...cur, [code]: value }));
+  const fillTender = (code: string | null) => {
+    const next: Record<string, string> = {};
+    if (code) next[code] = String(totals.grand);
+    setTenders(next);
+  };
 
   const checkout = async () => {
     if (lines.length === 0) {
       setMsg({ text: "Add at least one product before finalizing.", ok: false });
+      return;
+    }
+    if (overReceived) {
+      setMsg({ text: "Amount received cannot be more than the bill total.", ok: false });
       return;
     }
     if (!branchId) {
@@ -379,11 +455,15 @@ export default function POS() {
       setMsg({ text: `Balance would exceed ${customer.name}'s khata limit of ${inr(customer.credit_limit)}.`, ok: false });
       return;
     }
+    const parts = tenderModes
+      .map((m) => ({ mode: m.code, amount: r2(Math.max(0, Number(tenders[m.code]) || 0)) }))
+      .filter((p) => p.amount > 0);
     const payload = {
       branch_id: branchId,
       customer_id: customer?.id ?? null,
-      payment_mode: paid === 0 ? "credit" : payment === "credit" ? "cash" : payment,
+      payment_mode: parts.length === 0 ? "credit" : parts.length === 1 ? parts[0].mode : "mixed",
       amount_paid: r2(paid),
+      tenders: parts,
       lines: totals.lines.map((l) => ({
         product_id: l.product_id,
         quantity: l.quantity,
@@ -397,10 +477,13 @@ export default function POS() {
         const inv = await api.createInvoice(payload);
         const bal = r2(Number(inv.grand_total) - Number(inv.amount_paid));
         setLastInv(inv);
+        const paidBits = parts.length
+          ? parts.map((p) => `${p.mode} ${inr(p.amount)}`).join(" + ")
+          : "all on credit";
         setMsg({
           text: bal > 0
-            ? `Invoice ${inv.invoice_no} · paid ${inr(inv.amount_paid)} · balance ${inr(bal)} on khata`
-            : `Invoice ${inv.invoice_no} finalized — ${inr(inv.grand_total)} paid`,
+            ? `Invoice ${inv.invoice_no} · ${paidBits} · balance ${inr(bal)} on khata`
+            : `Invoice ${inv.invoice_no} finalized — ${paidBits}`,
           ok: true,
         });
         if (openPrint) printThermalReceipt(inv);
@@ -408,7 +491,7 @@ export default function POS() {
         await queueInvoice(payload); setPending(await pendingCount());
         setMsg({ text: "Saved offline — will sync when back online.", ok: true });
       }
-      setLines([]); selectCustomer(null); setBillDiscount(""); setDiscMode("inr"); setPayment("cash");
+      clearActive();
       setProducts((cur) => cur.map((p) => {
         const sold = payload.lines.filter((l) => l.product_id === p.id);
         if (!sold.length || p.stock_qty == null) return p;
@@ -442,7 +525,7 @@ export default function POS() {
     <div>
       <PageHeader
         title="Point of Sale"
-        subtitle="Fast keyboard-first counter billing with offline resilience"
+        subtitle="Credit is the default. Hold a bill to serve the next farmer without losing this one."
         actions={
           <>
             <Badge tone={online ? "success" : "warn"}>{online ? <><Wifi size={13} /> Online</> : <><WifiOff size={13} /> Offline</>}</Badge>
@@ -459,6 +542,22 @@ export default function POS() {
           </>
         }
       />
+
+      {(held.length > 0 || (lines.length > 0 || customer)) && (
+        <div className="held-bar">
+          <span className="muted" style={{ fontSize: 12, fontWeight: 700 }}>
+            {held.length ? "Held bills — tap to resume" : "This bill stays if you open another page"}
+          </span>
+          {held.map((h) => (
+            <span key={h.id} className="held-chip">
+              <button type="button" onClick={() => resumeHeld(h.id)}>
+                {h.customer?.name || "Walk-in"} · {h.lines?.length || 0} {h.lines?.length === 1 ? "line" : "lines"}
+              </button>
+              <button type="button" className="x" title="Discard held bill" onClick={() => discardHeld(h.id)}><X size={12} /></button>
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="pos-grid">
         <Card>
@@ -602,7 +701,7 @@ export default function POS() {
                       </Badge>
                     );
                   })()}
-                  {customer.credit_allowed && <Badge tone="info">Khata: {inr(customer.outstanding_balance)}</Badge>}
+                  {customer.credit_allowed && <Badge tone="info">Khata: {khataText(customer.outstanding_balance)}</Badge>}
                 </span>
                 <span className="row" style={{ gap: 6 }}>
                   <button type="button" className="btn btn-ghost btn-sm" onClick={openBills} disabled={billsBusy} title="Previous bills and items">
@@ -635,7 +734,7 @@ export default function POS() {
                             {[c.village, lastBillLabel(c.last_bill_date).text].filter(Boolean).join(" · ")}
                           </div>
                         </span>
-                        {c.credit_allowed && <Badge tone="info">Khata {inr(c.outstanding_balance)}</Badge>}
+                        {c.credit_allowed && <Badge tone="info">Khata {khataText(c.outstanding_balance)}</Badge>}
                       </button>
                     ))}
                     {farmerHits.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>{custQuery.trim() ? "No matching farmer" : "Type name, phone or Aadhaar — search stays fast at 10,000+ farmers"}</div>}
@@ -651,16 +750,25 @@ export default function POS() {
           </div>
 
           <div className="field">
-            <label>Payment mode</label>
-            <PaymentSelect value={payment} onChange={setPayMode} use="pos" bundle={bundle} />
-          </div>
-          <div className="field">
-            <label>Amount received now</label>
-            <div className="row" style={{ gap: 8 }}>
-              <input type="number" min={0} step="0.01" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} />
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setPayment("cash"); setAmountPaid(String(totals.grand)); }}>Full</button>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setPayment("credit"); setAmountPaid("0"); }}>None</button>
+            <label>Received now</label>
+            <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+              Leave these blank to put the whole bill on credit (khata). Fill more than one to split the payment.
+            </p>
+            <div className="tender-row" style={{ gridTemplateColumns: `repeat(${Math.max(tenderModes.length, 1)}, minmax(0, 1fr))` }}>
+              {tenderModes.map((m) => {
+                const label = m.code === "upi" ? "UPI" : m.code === "cash" ? "Cash" : m.code === "card" ? "Card" : m.name.replace(/\(.*\)/, "").trim();
+                return (
+                  <div key={m.code} className="tender-cell">
+                    <span>{label}</span>
+                    <input type="number" min={0} step="0.01" placeholder="0" value={tenders[m.code] ?? ""}
+                      onChange={(e) => setTenderAmt(m.code, e.target.value)} />
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => fillTender(m.code)}>All</button>
+                  </div>
+                );
+              })}
             </div>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => fillTender(null)}>All on credit</button>
+            {overReceived && <div className="error" style={{ marginTop: 8 }}>Received {inr(received)} is more than the bill total.</div>}
           </div>
           <div className={`totals-row ${due > 0 ? "balance-due" : ""}`}>
             <span>Balance due</span>
@@ -681,9 +789,14 @@ export default function POS() {
               label="Open print dialog after billing"
             />
           </div>
-          <button className="btn btn-primary btn-block" disabled={lines.length === 0 || !branchId} onClick={checkout} style={{ marginTop: 12 }}>
-            <CheckCircle2 size={18} /> Finalize Invoice
-          </button>
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button type="button" className="btn btn-ghost" disabled={!lines.length && !customer} onClick={holdCurrent} title="Park this bill and start another farmer">
+              Hold bill
+            </button>
+            <button className="btn btn-primary" style={{ flex: 1 }} disabled={lines.length === 0 || !branchId || overReceived} onClick={checkout}>
+              <CheckCircle2 size={18} /> Finalize Invoice
+            </button>
+          </div>
           {msg && <div className={msg.ok ? "" : "error"} style={{ marginTop: 12, color: msg.ok ? "var(--brand-600)" : undefined, fontWeight: 600, fontSize: 13 }}>{msg.text}</div>}
           {lastInv && msg?.ok && (
             <button type="button" className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={() => printThermalReceipt(lastInv)}>

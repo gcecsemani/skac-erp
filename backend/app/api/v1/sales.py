@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_, select
@@ -29,6 +30,20 @@ def _branch_address(b: Branch | None) -> str | None:
     return ", ".join(parts) or None
 
 
+def _payment_summary(inv: Invoice) -> str:
+    labels: list[str] = []
+    for tender in list(inv.tenders or []):
+        if tender.amount and Decimal(tender.amount) > 0 and tender.mode not in labels:
+            labels.append(str(tender.mode))
+    due = Decimal(inv.grand_total or 0) - Decimal(inv.amount_paid or 0)
+    if due > Decimal("0.004") and "credit" not in labels:
+        labels.append("credit")
+    if labels:
+        return " + ".join(labels)
+    mode = inv.payment_mode
+    return mode.value if hasattr(mode, "value") else str(mode)
+
+
 def _invoice_out(inv: Invoice) -> InvoiceOut:
     data = InvoiceOut.model_validate(inv)
     b = getattr(inv, "branch", None)
@@ -50,12 +65,14 @@ def _invoice_out(inv: Invoice) -> InvoiceOut:
         "customer_name": c.name if c is not None else None,
         "customer_phone": c.phone if c is not None else None,
         "customer_village": c.village if c is not None else None,
+        "payment_summary": _payment_summary(inv),
     })
 
 
 def _invoice_load():
     return (
         selectinload(Invoice.items),
+        selectinload(Invoice.tenders),
         joinedload(Invoice.branch).joinedload(Branch.organization),
         joinedload(Invoice.customer),
     )
@@ -64,6 +81,7 @@ def _invoice_load():
 def _invoice_list_load():
     return (
         noload(Invoice.items),
+        selectinload(Invoice.tenders),
         joinedload(Invoice.branch).joinedload(Branch.organization),
         joinedload(Invoice.customer),
     )
@@ -77,6 +95,10 @@ def _to_input(payload: InvoiceCreate) -> billing.InvoiceInput:
         tax_type=payload.tax_type,
         invoice_date=payload.invoice_date,
         amount_paid=payload.amount_paid,
+        tenders=(
+            [(t.mode, t.amount) for t in payload.tenders]
+            if payload.tenders is not None else None
+        ),
         client_uuid=payload.client_uuid,
         lines=[
             billing.LineInput(

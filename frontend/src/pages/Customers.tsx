@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen, Undo2 } from "lucide-react";
 import { api } from "../api";
-import { inr, lastBillLabel } from "../format";
+import { inr, khataText, lastBillLabel } from "../format";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
@@ -139,7 +139,7 @@ export default function Customers() {
             { key: "village", label: "Village" },
             { key: "district", label: "District" },
             { key: "credit_allowed", label: "Credit", render: (r) => r.credit_allowed ? <Badge tone="info">Allowed · {inr(r.credit_limit)}</Badge> : <Badge>Cash only</Badge> },
-            { key: "outstanding_balance", label: "Outstanding", num: true, render: (r) => <strong style={{ color: r.outstanding_balance > 0 ? "var(--danger)" : "inherit" }}>{inr(r.outstanding_balance)}</strong> },
+            { key: "outstanding_balance", label: "Outstanding", num: true, render: (r) => <strong style={{ color: Number(r.outstanding_balance) > 0 ? "var(--danger)" : Number(r.outstanding_balance) < 0 ? "var(--brand-600)" : "inherit" }}>{khataText(r.outstanding_balance)}</strong> },
             { key: "last_bill_date", label: "Last bill", render: (r) => {
               const last = lastBillLabel(r.last_bill_date);
               return <span className={last.days == null || last.days > 90 ? "muted" : undefined}>{last.text}</span>;
@@ -299,10 +299,10 @@ export default function Customers() {
           footer={<button className="btn btn-ghost" onClick={() => setLedger(null)}>Close</button>}>
           <p className="muted" style={{ marginTop: 0 }}>
             {ledger.phone || "No phone"}{ledger.village ? ` · ${ledger.village}` : ""} · Outstanding{" "}
-            <strong style={{ color: Number(ledger.outstanding_balance) > 0 ? "var(--danger)" : "inherit" }}>{inr(ledger.outstanding_balance)}</strong>
+            <strong style={{ color: Number(ledger.outstanding_balance) > 0 ? "var(--danger)" : Number(ledger.outstanding_balance) < 0 ? "var(--brand-600)" : "inherit" }}>{khataText(ledger.outstanding_balance)}</strong>
           </p>
           <p className="muted" style={{ marginTop: 0 }}>
-            Outstanding is khata billed, minus collections, minus sales returns. A sales return does not cancel the original invoice. The invoice stays finalized, and the credit note is what reduces the balance.
+            Outstanding is khata billed, minus collections, minus the unpaid part of a sales return. Money already collected on that bill is refunded and does not reduce khata below zero. A sales return does not cancel the original invoice.
             {ledger.has_opening ? " This farmer also has a brought-forward balance that is not on a bill below." : ""}
           </p>
           <h3 style={{ fontSize: 14, margin: "4px 0 8px" }}>Statement</h3>

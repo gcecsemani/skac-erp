@@ -24,6 +24,7 @@ export default function Returns() {
   const [qty, setQty] = useState<Record<number, number>>({});
   const [reason, setReason] = useState("");
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
   const findAc = useRef<AbortController | null>(null);
   const findSeq = useRef(0);
 
@@ -93,10 +94,34 @@ export default function Returns() {
     const msg = V.minLen(reason, "Reason", 3);
     if (msg) { setErr(msg); return; }
     try {
-      await api.createCreditNote({ invoice_id: invoice.id, reason, items });
+      const res: any = await api.createCreditNote({ invoice_id: invoice.id, reason, items });
+      const refund = Number(res.refund_amount || 0);
+      const khata = Number(res.khata_amount || 0);
+      const bits = [`Credit note ${res.note_no || ""} issued`.trim()];
+      if (khata > 0) bits.push(`khata reduced by ${inr(khata)}`);
+      if (refund > 0) bits.push(`refund ${inr(refund)} in ${res.refund_mode || "cash"}`);
+      if (khata <= 0 && refund <= 0) bits.push(`amount ${inr(res.total)}`);
+      setNotice(bits.join(" · ") + ".");
       setOpen(false); setInvoice(null); setQty({}); setInvoiceId(""); setReason(""); setInvoiceHits([]); load();
     } catch (e: any) { setErr(e.message); }
   };
+
+  const returnPreview = useMemo(() => {
+    if (!invoice) return null;
+    const value = (invoice.items || []).reduce((sum: number, it: any) => {
+      const q = Number(qty[it.product_id] || 0);
+      if (q <= 0) return sum;
+      const taxable = q * Number(it.unit_price || 0);
+      const tax = taxable * Number(it.gst_rate || 0) / 100;
+      return sum + taxable + tax;
+    }, 0);
+    const total = Math.round(value * 100) / 100;
+    if (total <= 0) return null;
+    const unpaid = Math.max(0, Number(invoice.grand_total || 0) - Number(invoice.amount_paid || 0));
+    const khata = invoice.customer_id ? Math.min(total, unpaid) : 0;
+    const refund = Math.round((total - khata) * 100) / 100;
+    return { total, khata, refund };
+  }, [invoice, qty]);
 
   if (!rows) return <Loading />;
 
@@ -119,6 +144,7 @@ export default function Returns() {
           </div>
         }
       />
+      {notice && <p style={{ color: "var(--brand-600)", fontWeight: 600, marginTop: 0 }}>{notice}</p>}
       <Card>
         <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10, alignItems: "center" }}>
           <SearchInput value={q} onChange={setQ} placeholder="Search note #, invoice, farmer…" />
@@ -184,7 +210,7 @@ export default function Returns() {
               {invoice.customer_phone ? ` · ${invoice.customer_phone}` : ""}
               {" · "}{invoice.payment_mode} · {inr(invoice.grand_total)}
               {" · Invoice stays "}{invoice.status || "finalized"}
-              {". The credit note reduces this farmer's khata and shows on their ledger."}
+              {". Unpaid amount reduces khata. Amount already collected is refunded, so outstanding does not go negative."}
             </p>
           )}
           {invoice && !loadingInvoice && (
@@ -202,6 +228,14 @@ export default function Returns() {
                 ]}
                 rows={invoice.items || []}
               />
+              {returnPreview && (
+                <p className="muted" style={{ marginBottom: 0 }}>
+                  Return {inr(returnPreview.total)}
+                  {returnPreview.khata > 0 ? ` · khata − ${inr(returnPreview.khata)}` : ""}
+                  {returnPreview.refund > 0 ? ` · refund ${inr(returnPreview.refund)}` : ""}
+                  {returnPreview.khata <= 0 && returnPreview.refund > 0 ? " · farmer outstanding stays the same" : ""}
+                </p>
+              )}
             </>
           )}
         </Modal>
