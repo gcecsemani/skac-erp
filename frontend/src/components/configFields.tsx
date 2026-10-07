@@ -53,6 +53,7 @@ export function LocationFields({
           emptyLabel={!district ? "Select district first" : "Select village"}
           placeholder={!district ? "Select district first" : "Type to search village…"}
           getId={(v) => v.name}
+          getHint={(v) => v.extra?.block || ""}
           onChange={(name) => onChange({ village: String(name || "") })}
         />
       </Field>

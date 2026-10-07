@@ -206,6 +206,8 @@ export function SearchInput({
   );
 }
 
+const SEARCH_LIMIT = 80;
+
 /** Prefix and word-start matches rank above a match buried in the middle of a name. */
 function searchRank(label: string, needle: string): number {
   if (label === needle) return 0;
@@ -213,6 +215,20 @@ function searchRank(label: string, needle: string): number {
   const words = label.split(/[^a-z0-9]+/);
   if (words.some((word) => word.startsWith(needle))) return 2;
   return 3;
+}
+
+function rankMatches(options: any[], needle: string, getLabel: (o: any) => string): any[] {
+  return options
+    .map((o, i) => ({ o, i, label: String(getLabel(o) ?? "").trim().toLowerCase() }))
+    .filter((row) => row.label.includes(needle))
+    .sort((a, b) => {
+      const rank = searchRank(a.label, needle) - searchRank(b.label, needle);
+      if (rank !== 0) return rank;
+      const byName = a.label.localeCompare(b.label);
+      return byName !== 0 ? byName : a.i - b.i;
+    })
+    .slice(0, SEARCH_LIMIT)
+    .map((row) => row.o);
 }
 
 /** Type-to-filter picker for vendors, products, districts, etc. */
@@ -223,6 +239,7 @@ export function SearchSelect({
   placeholder = "Search…",
   getLabel = (o: any) => o.name,
   getId = (o: any) => o.id,
+  getHint,
   onQuery,
   loading,
   disabled,
@@ -235,6 +252,7 @@ export function SearchSelect({
   placeholder?: string;
   getLabel?: (o: any) => string;
   getId?: (o: any) => number | string;
+  getHint?: (o: any) => string;
   onQuery?: (q: string) => void;
   loading?: boolean;
   disabled?: boolean;
@@ -246,27 +264,26 @@ export function SearchSelect({
   const [picked, setPicked] = useState<any>(null);
   const [pending, setPending] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const queryTimer = useRef<number | null>(null);
   const fromList = options.find((o) => String(getId(o)) === String(value));
   const selected = fromList || (picked && String(getId(picked)) === String(value) ? picked : null);
   const closedLabel = selected ? getLabel(selected) : (value ? String(value) : "");
   const busy = !!(loading || pending);
+  const needle = q.trim().toLowerCase();
+  // A long master list (a district with hundreds of villages) must not open on
+  // the first 80 rows. Those are whatever was imported first, so a name that
+  // starts with the search sits under every earlier name that merely contains it.
+  const typeToSearch = !onQuery && !needle && options.length > SEARCH_LIMIT;
   const filtered = useMemo(() => {
-    if (onQuery) return options.slice(0, 80);
-    const needle = q.trim().toLowerCase();
-    if (!needle) return options.slice(0, 80);
-    return options
-      .map((o, i) => ({ o, i, label: getLabel(o).toLowerCase() }))
-      .filter((row) => row.label.includes(needle))
-      .sort((a, b) => {
-        const rank = searchRank(a.label, needle) - searchRank(b.label, needle);
-        if (rank !== 0) return rank;
-        const byName = a.label.localeCompare(b.label);
-        return byName !== 0 ? byName : a.i - b.i;
-      })
-      .slice(0, 80)
-      .map((row) => row.o);
-  }, [options, q, getLabel, onQuery]);
+    if (onQuery) return options.slice(0, SEARCH_LIMIT);
+    if (!needle) return options.length > SEARCH_LIMIT ? [] : options;
+    return rankMatches(options, needle, getLabel);
+  }, [options, needle, getLabel, onQuery]);
+
+  useEffect(() => {
+    if (open) menuRef.current?.scrollTo(0, 0);
+  }, [open, needle]);
 
   useEffect(() => {
     if (fromList) setPicked(fromList);
@@ -298,7 +315,13 @@ export function SearchSelect({
         value={open ? q : closedLabel}
         placeholder={placeholder}
         disabled={disabled}
-        onFocus={() => { if (disabled) return; setOpen(true); setQ(closedLabel); }}
+        autoComplete="off"
+        onFocus={(e) => {
+          if (disabled) return;
+          setOpen(true);
+          setQ(closedLabel);
+          e.currentTarget.select();
+        }}
         onChange={(e) => {
           const next = e.target.value;
           setQ(next);
@@ -310,7 +333,7 @@ export function SearchSelect({
         }}
       />
       {open && !disabled && (
-        <div style={{
+        <div ref={menuRef} style={{
           position: "absolute", zIndex: 30, top: "100%", left: 0, right: 0, marginTop: 4,
           background: "var(--surface)", border: "1px solid var(--border)",
           borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-lg)",
@@ -334,10 +357,15 @@ export function SearchSelect({
               <Loader2 size={14} className="spin" /> Searching…
             </div>
           )}
-          {!busy && filtered.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>No matches</div>}
-          {!busy && filtered.map((o) => (
+          {!busy && typeToSearch && (
+            <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>Type to search all {options.length}</div>
+          )}
+          {!busy && !typeToSearch && filtered.length === 0 && <div className="muted" style={{ padding: "9px 12px", fontSize: 13 }}>No matches</div>}
+          {!busy && filtered.map((o, i) => {
+            const hint = getHint?.(o)?.trim();
+            return (
             <button
-              key={String(getId(o))}
+              key={String(o?.id ?? `${getId(o)}-${i}`)}
               type="button"
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(getId(o), o)}
@@ -347,8 +375,10 @@ export function SearchSelect({
               }}
             >
               {getLabel(o)}
+              {hint && <span className="muted"> · {hint}</span>}
             </button>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
