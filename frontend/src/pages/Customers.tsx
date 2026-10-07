@@ -65,7 +65,7 @@ export default function Customers() {
     try { setBill(await api.invoice(row.id)); }
     catch (e: any) {
       setBillErr(e.message || "Could not load this invoice");
-      setBill((cur) => (cur ? { ...cur, loading: false } : cur));
+      setBill((cur: any) => (cur ? { ...cur, loading: false } : cur));
     }
   };
   const openCreate = () => { setEditId(null); setForm(empty); setErr(""); setOpen(true); };
