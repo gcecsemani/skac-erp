@@ -114,6 +114,45 @@ export function localISODate(d = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function clockLabel(hour24: number, minute: number): string {
+  const suffix = hour24 >= 12 ? "pm" : "am";
+  const hour = hour24 % 12 || 12;
+  return `${hour}:${String(minute).padStart(2, "0")} ${suffix}`;
+}
+
+/**
+ * Invoice date plus the time the bill was saved.
+ * New bills store UTC and include a fraction of a second. Imported bills
+ * already store India wall-clock time with whole seconds.
+ */
+export function formatInvoiceStamp(invoiceDate?: string | null, finalizedAt?: string | null): string {
+  const date = String(invoiceDate || "").slice(0, 10);
+  const raw = String(finalizedAt || "").trim();
+  if (!raw) return date || "—";
+  const utc = /\.\d+/.test(raw) || /[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw);
+  if (!utc) {
+    const clock = raw.match(/(\d{2}):(\d{2})/);
+    if (!clock) return date || "—";
+    const time = clockLabel(Number(clock[1]), Number(clock[2]));
+    return date ? `${date} ${time}` : time;
+  }
+  const hasZone = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw);
+  const iso = hasZone ? raw : `${raw.replace(" ", "T")}Z`;
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return date || "—";
+  const parts = new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(when);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return date || "—";
+  const time = clockLabel(hour, minute);
+  return date ? `${date} ${time}` : time;
+}
+
 /** Today in the shop's own timezone. Never use toISOString() — in IST it
  *  reports yesterday between midnight and 05:30. */
 export const todayISO = () => localISODate();

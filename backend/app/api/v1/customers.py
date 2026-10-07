@@ -661,6 +661,7 @@ def customer_ledger(
         "entries": entries,
         "invoices": [
             {
+                "id": int(iid),
                 "invoice_no": no,
                 "date": d.isoformat(),
                 "total": float(total),

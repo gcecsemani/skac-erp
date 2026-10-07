@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Eye, Printer, Search } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { inr } from "../format";
+import { formatInvoiceStamp, inr } from "../format";
 import { printThermalReceipt } from "../print";
 import { Badge, Card, ExportButtons, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
 import { PaymentSelect } from "../components/configFields";
@@ -86,7 +86,11 @@ export default function Invoices() {
           { key: "payment_mode", label: "Payment" },
           { key: "grand_total", label: "Total", num: true, money: true },
           { key: "amount_paid", label: "Paid", num: true, money: true },
-        ]} rows={(rows || []).map((r) => ({ ...r, customer_name: r.customer_name || "Walk-in" }))} />}
+        ]} rows={(rows || []).map((r) => ({
+          ...r,
+          customer_name: r.customer_name || "Walk-in",
+          invoice_date: formatInvoiceStamp(r.invoice_date, r.finalized_at),
+        }))} />}
       />
       <p className="muted" style={{ marginTop: -8, marginBottom: 14, fontSize: 13 }}>
         GST invoices are locked after finalization (no edit/delete). To reverse a bill, raise a credit note on{" "}
@@ -129,7 +133,7 @@ export default function Invoices() {
         <Table
           columns={[
             { key: "invoice_no", label: "Invoice #" },
-            { key: "invoice_date", label: "Date" },
+            { key: "invoice_date", label: "Date", render: (r) => formatInvoiceStamp(r.invoice_date, r.finalized_at) },
             { key: "branch_name", label: "Branch", render: (r) => r.branch_name || "—" },
             { key: "customer_name", label: "Farmer", render: (r) => r.customer_name || <span className="muted">Walk-in</span> },
             { key: "customer_village", label: "Village", render: (r) => r.customer_village || "—" },
@@ -160,7 +164,7 @@ export default function Invoices() {
         <Modal title={`Invoice ${sel.invoice_no}`} onClose={() => setSel(null)} wide
           footer={<button className="btn btn-primary" onClick={() => printInvoice(sel)}><Printer size={16} /> Print receipt</button>}>
           <div className="row mb-16" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-            <div><div className="muted">Date</div><strong>{sel.invoice_date}</strong></div>
+            <div><div className="muted">Date</div><strong>{formatInvoiceStamp(sel.invoice_date, sel.finalized_at)}</strong></div>
             <div><div className="muted">Branch</div><strong>{sel.branch_name || "—"}</strong></div>
             <div><div className="muted">Farmer</div><strong>{sel.customer_name || "Walk-in"}</strong>
               {(sel.customer_village || sel.customer_phone) && (

@@ -139,9 +139,9 @@ export function ExportButtons({ title, subtitle = "", columns, rows }: {
   );
 }
 
-export function Modal({ title, onClose, children, footer, wide }: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+export function Modal({ title, onClose, children, footer, wide, zIndex = 60 }: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean; zIndex?: number }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.5)", zIndex: 60, display: "grid", placeItems: "center", padding: 16 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.5)", zIndex, display: "grid", placeItems: "center", padding: 16 }} onClick={onClose}>
       <div className="card" style={{ width: "100%", maxWidth: wide ? 760 : 520, maxHeight: "90vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
         <div className="card-head">
           <div className="card-title">{title}</div>
@@ -206,6 +206,15 @@ export function SearchInput({
   );
 }
 
+/** Prefix and word-start matches rank above a match buried in the middle of a name. */
+function searchRank(label: string, needle: string): number {
+  if (label === needle) return 0;
+  if (label.startsWith(needle)) return 1;
+  const words = label.split(/[^a-z0-9]+/);
+  if (words.some((word) => word.startsWith(needle))) return 2;
+  return 3;
+}
+
 /** Type-to-filter picker for vendors, products, districts, etc. */
 export function SearchSelect({
   value,
@@ -245,10 +254,18 @@ export function SearchSelect({
   const filtered = useMemo(() => {
     if (onQuery) return options.slice(0, 80);
     const needle = q.trim().toLowerCase();
-    const list = needle
-      ? options.filter((o) => getLabel(o).toLowerCase().includes(needle))
-      : options;
-    return list.slice(0, 80);
+    if (!needle) return options.slice(0, 80);
+    return options
+      .map((o, i) => ({ o, i, label: getLabel(o).toLowerCase() }))
+      .filter((row) => row.label.includes(needle))
+      .sort((a, b) => {
+        const rank = searchRank(a.label, needle) - searchRank(b.label, needle);
+        if (rank !== 0) return rank;
+        const byName = a.label.localeCompare(b.label);
+        return byName !== 0 ? byName : a.i - b.i;
+      })
+      .slice(0, 80)
+      .map((row) => row.o);
   }, [options, q, getLabel, onQuery]);
 
   useEffect(() => {

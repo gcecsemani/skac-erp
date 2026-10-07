@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen, Undo2 } from "lucide-react";
+import { Plus, Search, Wallet, Pencil, Trash2, MessageCircle, BookOpen, Undo2, Eye, Printer } from "lucide-react";
 import { api } from "../api";
-import { inr, khataText, lastBillLabel } from "../format";
+import { formatInvoiceStamp, inr, khataText, lastBillLabel } from "../format";
+import { printThermalReceipt } from "../print";
 import { Badge, Card, ExportButtons, Field, Loading, Modal, PageHeader, Table, BranchSelect } from "../components/ui";
 import { LocationFields, PaymentSelect } from "../components/configFields";
 import { useConfigBundle } from "../configBundle";
@@ -25,6 +26,8 @@ export default function Customers() {
   const [remind, setRemind] = useState<any | null>(null);
   const [remindBusy, setRemindBusy] = useState(false);
   const [ledger, setLedger] = useState<any | null>(null);
+  const [bill, setBill] = useState<any | null>(null);
+  const [billErr, setBillErr] = useState("");
   const [payConfirm, setPayConfirm] = useState(false);
   const [revPay, setRevPay] = useState<any | null>(null);
   const [revReason, setRevReason] = useState("");
@@ -56,6 +59,15 @@ export default function Customers() {
     [rows, search],
   );
 
+  const openBill = async (row: any) => {
+    setBillErr("");
+    setBill({ invoice_no: row.invoice_no, loading: true });
+    try { setBill(await api.invoice(row.id)); }
+    catch (e: any) {
+      setBillErr(e.message || "Could not load this invoice");
+      setBill((cur) => (cur ? { ...cur, loading: false } : cur));
+    }
+  };
   const openCreate = () => { setEditId(null); setForm(empty); setErr(""); setOpen(true); };
   const openEdit = (r: any) => {
     setEditId(r.id); setErr("");
@@ -147,7 +159,10 @@ export default function Customers() {
             { key: "actions", label: "", render: (r) => (
               <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
                 <button className="icon-btn" style={{ width: 30, height: 30 }} title="Ledger / payment history" onClick={async () => {
-                  try { setLedger(await api.customerLedger(r.id)); } catch (e: any) { alert(e.message); }
+                  try {
+                    setBill(null); setBillErr("");
+                    setLedger(await api.customerLedger(r.id));
+                  } catch (e: any) { alert(e.message); }
                 }}><BookOpen size={14} /></button>
                 {r.outstanding_balance > 0 && (
                   <>
@@ -295,8 +310,8 @@ export default function Customers() {
       )}
 
       {ledger && (
-        <Modal title={`Ledger — ${ledger.name}`} onClose={() => setLedger(null)} wide
-          footer={<button className="btn btn-ghost" onClick={() => setLedger(null)}>Close</button>}>
+        <Modal title={`Ledger — ${ledger.name}`} onClose={() => { setLedger(null); setBill(null); setBillErr(""); }} wide
+          footer={<button className="btn btn-ghost" onClick={() => { setLedger(null); setBill(null); setBillErr(""); }}>Close</button>}>
           <p className="muted" style={{ marginTop: 0 }}>
             {ledger.phone || "No phone"}{ledger.village ? ` · ${ledger.village}` : ""} · Outstanding{" "}
             <strong style={{ color: Number(ledger.outstanding_balance) > 0 ? "var(--danger)" : Number(ledger.outstanding_balance) < 0 ? "var(--brand-600)" : "inherit" }}>{khataText(ledger.outstanding_balance)}</strong>
@@ -337,11 +352,54 @@ export default function Customers() {
               { key: "total", label: "Total", num: true, render: (r) => inr(r.total) },
               { key: "returned", label: "Returned", num: true, render: (r) => Number(r.returned) > 0 ? inr(r.returned) : "—" },
               { key: "outstanding", label: "Balance", num: true, render: (r) => Math.abs(Number(r.outstanding)) < 0.005 ? "Paid" : inr(r.outstanding) },
+              { key: "view", label: "", render: (r) => (
+                <button className="btn btn-ghost btn-sm" title="View invoice" onClick={() => openBill(r)}><Eye size={15} /></button>
+              ) },
             ]}
             rows={ledger.invoices || []}
             empty="No invoices for this farmer"
             pageSize={25}
           />
+        </Modal>
+      )}
+
+      {bill && (
+        <Modal title={`Invoice ${bill.invoice_no || ""}`} onClose={() => { setBill(null); setBillErr(""); }} wide zIndex={80}
+          footer={<button className="btn btn-primary" disabled={!bill.items} onClick={() => {
+            try { printThermalReceipt(bill); } catch (e: any) { alert(e.message); }
+          }}><Printer size={16} /> Print receipt</button>}>
+          {billErr && <div className="error">{billErr}</div>}
+          {bill.loading && <Loading label="Loading invoice…" />}
+          {!bill.loading && !billErr && (
+            <>
+              <div className="row mb-16" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+                <div><div className="muted">Date</div><strong>{formatInvoiceStamp(bill.invoice_date, bill.finalized_at)}</strong></div>
+                <div><div className="muted">Branch</div><strong>{bill.branch_name || "—"}</strong></div>
+                <div><div className="muted">Farmer</div><strong>{bill.customer_name || ledger?.name || "Walk-in"}</strong>
+                  {(bill.customer_village || bill.customer_phone) && (
+                    <div className="muted" style={{ fontSize: 12 }}>{[bill.customer_village, bill.customer_phone].filter(Boolean).join(" · ")}</div>
+                  )}
+                </div>
+                <div><div className="muted">Payment</div><strong style={{ textTransform: "capitalize" }}>{bill.payment_summary || bill.payment_mode}</strong></div>
+                <div><div className="muted">Discount</div><strong>{inr(bill.discount_total)}</strong></div>
+                <div><div className="muted">Total</div><strong>{inr(bill.grand_total)}</strong></div>
+                <div><div className="muted">Paid</div><strong>{inr(bill.amount_paid)}</strong></div>
+                <div><div className="muted">Balance</div><strong style={{ color: Number(bill.grand_total) - Number(bill.amount_paid) > 0 ? "var(--danger)" : "inherit" }}>{inr(Number(bill.grand_total) - Number(bill.amount_paid))}</strong></div>
+              </div>
+              <Table
+                columns={[
+                  { key: "product_name", label: "Product" },
+                  { key: "batch_no", label: "Batch" },
+                  { key: "expiry_date", label: "Expiry" },
+                  { key: "quantity", label: "Qty", num: true, render: (r) => `${r.quantity}${r.unit ? ` ${r.unit}` : ""}` },
+                  { key: "unit_price", label: "Rate", num: true, render: (r) => inr(r.unit_price) },
+                  { key: "discount", label: "Disc", num: true, render: (r) => Number(r.discount) > 0 ? inr(r.discount) : "—" },
+                  { key: "line_total", label: "Total", num: true, render: (r) => inr(r.line_total) },
+                ]}
+                rows={bill.items || []}
+              />
+            </>
+          )}
         </Modal>
       )}
 
