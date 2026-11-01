@@ -482,6 +482,13 @@ export default function POS() {
       return;
     }
     const { bill: parts, khata: khataParts } = splitReceived();
+    const invoiceLines = totals.lines.map((l) => ({
+      product_id: l.product_id,
+      quantity: l.quantity,
+      unit_price: l.unit_price,
+      discount: l.discount,
+      unit: l.unit,
+    }));
     const payload: any = {
       branch_id: branchId,
       customer_id: customer?.id ?? null,
@@ -489,13 +496,7 @@ export default function POS() {
       amount_paid: r2(towardBill),
       tenders: parts,
       ...(khataParts.length ? { khata_settlement: khataParts } : {}),
-      lines: totals.lines.map((l) => ({
-        product_id: l.product_id,
-        quantity: l.quantity,
-        unit_price: l.unit_price,
-        discount: l.discount,
-        unit: l.unit,
-      })),
+      lines: invoiceLines,
     };
     let settledBalance: number | null = null;
     try {
@@ -524,7 +525,7 @@ export default function POS() {
       }
       clearActive();
       setProducts((cur) => cur.map((p) => {
-        const sold = payload.lines.filter((l) => l.product_id === p.id);
+        const sold = invoiceLines.filter((l) => l.product_id === p.id);
         if (!sold.length || p.stock_qty == null) return p;
         const info = packInfo(p);
         const deduct = sold.reduce((s, l) => s + billedToStock(Number(l.quantity), l.unit, info), 0);
