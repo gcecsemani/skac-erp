@@ -232,3 +232,76 @@ def test_mixed_tender_posts_cash_upi_and_khata(db, org, branch, make_product, re
     assert by_code["1000"][0] == Decimal("100.00")
     assert by_code["1010"][0] == Decimal("200.00")
     assert by_code["1200"][0] == Decimal("200.00")
+
+
+def test_bill_can_settle_older_khata_in_the_same_save(db, org, branch, make_product, receive):
+    """Cash above this bill pays the new invoice first, then older khata."""
+    from app.models.customer import Customer, CustomerPayment, CustomerPaymentAllocation
+
+    farmer = Customer(
+        organization_id=org.id, name="Khata Farmer", phone="9000000099",
+        credit_allowed=True,
+    )
+    db.add(farmer)
+    db.flush()
+    p = make_product(sale_price="100", gst_rate="0", sku="KH1")
+    receive(p, "B1", 5)
+
+    older = _finalize(
+        db, org, branch,
+        [billing.LineInput(product_id=p.id, quantity=Decimal("1"))],
+        customer_id=farmer.id, amount_paid=Decimal("0"),
+    )
+    db.flush()
+    assert older.grand_total == Decimal("100.00")
+    assert farmer.outstanding_balance == Decimal("100.00")
+
+    fresh = _finalize(
+        db, org, branch,
+        [billing.LineInput(product_id=p.id, quantity=Decimal("1"))],
+        customer_id=farmer.id,
+        tenders=[("cash", Decimal("100"))],
+        khata_settlement=[("cash", Decimal("40"))],
+    )
+    db.flush()
+    db.refresh(older)
+    db.refresh(farmer)
+
+    assert fresh.amount_paid == Decimal("100.00")
+    assert fresh.grand_total == Decimal("100.00")
+    assert older.amount_paid == Decimal("40.00")
+    assert farmer.outstanding_balance == Decimal("60.00")
+    payment = db.scalar(select(CustomerPayment).where(CustomerPayment.customer_id == farmer.id))
+    assert payment is not None
+    assert payment.amount == Decimal("40.00")
+    alloc = db.scalar(select(CustomerPaymentAllocation).where(CustomerPaymentAllocation.payment_id == payment.id))
+    assert alloc.invoice_id == older.id
+    assert alloc.amount == Decimal("40.00")
+
+
+def test_old_khata_settlement_cannot_exceed_the_balance(db, org, branch, make_product, receive):
+    from app.models.customer import Customer
+
+    farmer = Customer(
+        organization_id=org.id, name="Small Khata", phone="9000000098",
+        credit_allowed=True,
+    )
+    db.add(farmer)
+    db.flush()
+    p = make_product(sale_price="100", gst_rate="0", sku="KH2")
+    receive(p, "B1", 5)
+    _finalize(
+        db, org, branch,
+        [billing.LineInput(product_id=p.id, quantity=Decimal("1"))],
+        customer_id=farmer.id, amount_paid=Decimal("0"),
+    )
+    db.flush()
+
+    with pytest.raises(ValueError, match="exceeds outstanding khata"):
+        _finalize(
+            db, org, branch,
+            [billing.LineInput(product_id=p.id, quantity=Decimal("1"))],
+            customer_id=farmer.id,
+            tenders=[("cash", Decimal("100"))],
+            khata_settlement=[("cash", Decimal("150"))],
+        )

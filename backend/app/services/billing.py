@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.units import billed_to_stock_qty, is_loose_sale, loose_unit_price
-from app.models.customer import Customer
+from app.models.customer import Customer, CustomerPayment, CustomerPaymentAllocation
+from app.models.returns import CreditNote
 from app.models.enums import InvoiceStatus, MovementType, PaymentMode, TaxType
 from app.models.organization import Branch
 from app.models.product import Product
@@ -19,6 +21,24 @@ from app.services import accounting, inventory
 TWOPLACES = Decimal("0.01")
 MAX_INVOICE_NO_PROBES = 50
 TENDER_MODES = {"cash", "upi", "card"}
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _shop_today() -> date:
+    """Business date for the shop, independent of the server's timezone."""
+    return datetime.now(IST).date()
+
+
+def _utc_now() -> datetime:
+    """Naive UTC. A non-zero fraction marks the value as UTC for the UI.
+
+    MySQL DATETIME without fractional seconds would drop that marker and the
+    invoice list would show the UTC clock as if it were already IST.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if now.microsecond == 0:
+        now = now.replace(microsecond=1)
+    return now
 
 
 @dataclass
@@ -43,6 +63,10 @@ class InvoiceInput:
     # When set, these are the amounts received now (cash / UPI / card).
     # Their sum is amount_paid. Anything left is khata. Empty list = full credit.
     tenders: list[tuple[str, Decimal]] | None = None
+    # Extra money, above this bill, applied to the farmer's older khata.
+    khata_settlement: list[tuple[str, Decimal]] | None = None
+    khata_collected: Decimal = Decimal("0")
+    khata_balance: Decimal | None = None
     client_uuid: str | None = None
     lines: list[LineInput] = None  # type: ignore[assignment]
 
@@ -76,6 +100,113 @@ def _apply_tenders(db: Session, invoice: Invoice, tenders, grand_total: Decimal)
     for mode_s, amt in cleaned:
         db.add(InvoiceTender(invoice_id=invoice.id, mode=mode_s, amount=amt))
     return cleaned
+
+
+def _clean_tenders(rows) -> list[tuple[str, Decimal]]:
+    cleaned: list[tuple[str, Decimal]] = []
+    for mode, amount in rows or []:
+        mode_s = str(mode).strip().lower()
+        amt = Decimal(amount).quantize(TWOPLACES)
+        if amt == 0:
+            continue
+        if amt < 0:
+            raise ValueError("Amount received cannot be negative")
+        if mode_s not in TENDER_MODES:
+            raise ValueError(f"Payment mode '{mode_s}' cannot be collected at the counter")
+        cleaned.append((mode_s, amt))
+    return cleaned
+
+
+def _allocate_khata_receipt(
+    db: Session, *, customer_id: int, amount: Decimal, payment_id: int, skip_invoice_id: int | None,
+) -> None:
+    """Apply a receipt to older unpaid bills. The invoice being finalized is skipped."""
+    remaining = Decimal(amount)
+    invoices = db.scalars(
+        select(Invoice)
+        .where(
+            Invoice.customer_id == customer_id,
+            Invoice.status == InvoiceStatus.finalized,
+            Invoice.grand_total > Invoice.amount_paid,
+        )
+        .order_by(Invoice.invoice_date.asc(), Invoice.id.asc())
+    ).all()
+    invoice_ids = {inv.id for inv in invoices}
+    credited: dict[int, Decimal] = {}
+    if invoice_ids:
+        for iid, total in db.execute(
+            select(CreditNote.invoice_id, func.coalesce(func.sum(CreditNote.total), 0))
+            .where(CreditNote.invoice_id.in_(invoice_ids))
+            .group_by(CreditNote.invoice_id)
+        ).all():
+            credited[int(iid)] = Decimal(total)
+    for inv in invoices:
+        if skip_invoice_id is not None and inv.id == skip_invoice_id:
+            continue
+        due = (inv.grand_total - inv.amount_paid - credited.get(inv.id, Decimal("0"))).quantize(TWOPLACES)
+        if due <= 0:
+            continue
+        apply = due if remaining >= due else remaining
+        apply = apply.quantize(TWOPLACES)
+        inv.amount_paid = (inv.amount_paid + apply).quantize(TWOPLACES)
+        db.add(CustomerPaymentAllocation(
+            payment_id=payment_id, invoice_id=inv.id, amount=apply,
+        ))
+        remaining = (remaining - apply).quantize(TWOPLACES)
+        if remaining <= 0:
+            break
+
+
+def _settle_old_khata(
+    db: Session, *, organization_id: int, branch_id: int, data: InvoiceInput, invoice: Invoice,
+) -> None:
+    """Collect money against khata that existed before this bill, in the same save."""
+    rows = _clean_tenders(data.khata_settlement)
+    if not rows:
+        return
+    if not data.customer_id:
+        raise ValueError("Select a farmer to settle old khata")
+    customer = db.get(Customer, data.customer_id)
+    if customer is None:
+        raise ValueError("Farmer not found")
+    total = sum((amt for _, amt in rows), Decimal("0")).quantize(TWOPLACES)
+    this_due = (invoice.grand_total - invoice.amount_paid).quantize(TWOPLACES)
+    old_balance = (Decimal(customer.outstanding_balance or 0) - this_due).quantize(TWOPLACES)
+    if old_balance < 0:
+        old_balance = Decimal("0")
+    if total > old_balance:
+        raise ValueError(
+            f"Old khata settlement of ₹{total} exceeds outstanding khata of ₹{old_balance}"
+        )
+    note = f"Settled with invoice {invoice.invoice_no}"
+    for mode_s, amt in rows:
+        payment = CustomerPayment(
+            organization_id=organization_id,
+            branch_id=branch_id,
+            customer_id=customer.id,
+            amount=amt,
+            mode=mode_s,
+            note=note[:255],
+            paid_at=datetime.now(),
+        )
+        db.add(payment)
+        db.flush()
+        _allocate_khata_receipt(
+            db, customer_id=customer.id, amount=amt, payment_id=payment.id,
+            skip_invoice_id=invoice.id,
+        )
+        accounting.post_customer_receipt(
+            db,
+            organization_id=organization_id,
+            branch_id=branch_id,
+            entry_date=invoice.invoice_date,
+            payment_id=payment.id,
+            amount=amt,
+            mode=mode_s,
+        )
+    customer.outstanding_balance = (Decimal(customer.outstanding_balance or 0) - total).quantize(TWOPLACES)
+    data.khata_collected = total
+    data.khata_balance = customer.outstanding_balance
 
 
 def _next_invoice_no(db: Session, branch: Branch) -> str:
@@ -147,11 +278,11 @@ def create_and_finalize(
         customer_id=data.customer_id,
         created_by_user_id=created_by_user_id,
         client_uuid=data.client_uuid,
-        invoice_date=data.invoice_date or date.today(),
+        invoice_date=data.invoice_date or _shop_today(),
         status=InvoiceStatus.finalized,
         tax_type=data.tax_type,
         payment_mode=data.payment_mode,
-        finalized_at=datetime.utcnow(),
+        finalized_at=_utc_now(),
     )
     db.add(invoice)
     db.flush()  # assign invoice.id
@@ -295,6 +426,10 @@ def create_and_finalize(
         taxable=invoice.subtotal, tax=invoice.tax_total,
         grand_total=invoice.grand_total, amount_paid=invoice.amount_paid,
         tenders=tender_rows,
+    )
+    _settle_old_khata(
+        db, organization_id=organization_id, branch_id=data.branch_id,
+        data=data, invoice=invoice,
     )
 
     return invoice

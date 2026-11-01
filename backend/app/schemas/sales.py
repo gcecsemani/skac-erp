@@ -32,6 +32,8 @@ class InvoiceCreate(BaseModel):
     amount_paid: Decimal = Field(default=Decimal("0"), ge=0)
     # Amounts collected now. Omit to keep the single payment_mode + amount_paid path.
     tenders: list[TenderIn] | None = None
+    # Money above this bill, applied to the farmer's older khata in the same save.
+    khata_settlement: list[TenderIn] | None = None
     client_uuid: str | None = None
     lines: list[InvoiceLineIn] = Field(min_length=1)
 
@@ -96,6 +98,8 @@ class InvoiceOut(BaseModel):
     grand_total: Decimal
     amount_paid: Decimal
     finalized_at: datetime | None
+    khata_collected: Decimal = Decimal("0")
+    khata_balance: Decimal | None = None
     items: list[InvoiceItemOut] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}

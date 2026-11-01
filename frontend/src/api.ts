@@ -203,7 +203,14 @@ export const api = {
   deleteCustomer: (id: number) => del(`/customers/${id}`),
 
   // inventory
-  stock: (branchId?: number) => get<any[]>(`/inventory/stock${branchId ? `?branch_id=${branchId}` : ""}`),
+  stock: (opts?: { branchId?: number; search?: string; limit?: number }) => {
+    const p = new URLSearchParams();
+    if (opts?.branchId) p.set("branch_id", String(opts.branchId));
+    if (opts?.search) p.set("search", opts.search);
+    if (opts?.limit) p.set("limit", String(opts.limit));
+    const q = p.toString();
+    return get<any[]>(`/inventory/stock${q ? `?${q}` : ""}`);
+  },
   receiveStock: (r: any) => post("/inventory/receive", r),
   adjustStock: (r: any) => post("/inventory/adjust", r),
   updateBatchCost: (batchId: number, purchase_price: number) =>

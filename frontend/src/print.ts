@@ -1,4 +1,4 @@
-import { inr, inrWords } from "./format";
+import { formatInvoiceStamp, inr, inrWords } from "./format";
 
 function esc(s: unknown) {
   return String(s ?? "")
@@ -139,7 +139,7 @@ ${hint}
 <hr>
 <div class="center"><strong>TAX INVOICE</strong></div>
 <div>Inv: ${esc(inv.invoice_no)}</div>
-<div>Date: ${esc(inv.invoice_date)}</div>
+<div>Date: ${esc(formatInvoiceStamp(inv.invoice_date, inv.finalized_at))}</div>
 <div>Farmer: ${esc(inv.customer_name || "Walk-in")}${inv.customer_phone ? ` · ${esc(inv.customer_phone)}` : ""}</div>
 ${inv.customer_village ? `<div class="muted">${esc(inv.customer_village)}</div>` : ""}
 <hr>
@@ -155,6 +155,9 @@ ${inv.customer_village ? `<div class="muted">${esc(inv.customer_village)}</div>`
   <tr class="tot"><td>TOTAL</td><td class="r">${inr(inv.grand_total).replace("₹", "Rs. ")}</td></tr>
   ${paidRows}
   ${due > 0.005 ? `<tr class="tot"><td>Balance (khata)</td><td class="r">${due.toFixed(2)}</td></tr>` : ""}
+  ${Number(inv.khata_collected) > 0.005 ? `<tr><td>Old khata paid</td><td class="r">${Number(inv.khata_collected).toFixed(2)}</td></tr>` : ""}
+  ${Number(inv.khata_collected) > 0.005 ? `<tr class="tot"><td>Collected now</td><td class="r">${(Number(inv.amount_paid) + Number(inv.khata_collected)).toFixed(2)}</td></tr>` : ""}
+  ${Number(inv.khata_collected) > 0.005 && inv.khata_balance != null ? `<tr><td>Khata left</td><td class="r">${Number(inv.khata_balance).toFixed(2)}</td></tr>` : ""}
 </table>
 <hr>
 <div class="ta">${esc(FARMER_PESTICIDE_DISCLAIMER)}</div>

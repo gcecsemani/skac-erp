@@ -120,10 +120,34 @@ function clockLabel(hour24: number, minute: number): string {
   return `${hour}:${String(minute).padStart(2, "0")} ${suffix}`;
 }
 
+/** Full India date and clock for a UTC timestamp. */
+function istStamp(when: Date): string | null {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    numberingSystem: "latn",
+  }).formatToParts(when);
+  const pick = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value || "";
+  const year = pick("year");
+  const month = pick("month");
+  const day = pick("day");
+  let hour = Number(pick("hour"));
+  const minute = Number(pick("minute"));
+  if (!year || !month || !day || !Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (hour === 24) hour = 0;
+  return `${year}-${month}-${day} ${clockLabel(hour, minute)}`;
+}
+
 /**
- * Invoice date plus the time the bill was saved.
- * New bills store UTC and include a fraction of a second. Imported bills
- * already store India wall-clock time with whole seconds.
+ * When the bill was saved, in India Standard Time.
+ * New bills store UTC and include a fraction of a second, so both the date
+ * and the clock are shifted to Asia/Kolkata. Imported bills already store
+ * India wall-clock time with whole seconds and keep the invoice date.
  */
 export function formatInvoiceStamp(invoiceDate?: string | null, finalizedAt?: string | null): string {
   const date = String(invoiceDate || "").slice(0, 10);
@@ -140,17 +164,7 @@ export function formatInvoiceStamp(invoiceDate?: string | null, finalizedAt?: st
   const iso = hasZone ? raw : `${raw.replace(" ", "T")}Z`;
   const when = new Date(iso);
   if (Number.isNaN(when.getTime())) return date || "—";
-  const parts = new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(when);
-  const hour = Number(parts.find((p) => p.type === "hour")?.value);
-  const minute = Number(parts.find((p) => p.type === "minute")?.value);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return date || "—";
-  const time = clockLabel(hour, minute);
-  return date ? `${date} ${time}` : time;
+  return istStamp(when) || date || "—";
 }
 
 /** Today in the shop's own timezone. Never use toISOString() — in IST it

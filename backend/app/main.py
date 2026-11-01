@@ -33,6 +33,26 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 
+def _invoice_timestamp_precision() -> None:
+    """Keep fractional seconds on finalized_at so the UI can tell UTC from IST."""
+    if engine.dialect.name != "mysql":
+        return
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT DATETIME_PRECISION FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoice' "
+                "AND COLUMN_NAME = 'finalized_at'"
+            )).first()
+            if row is None or int(row[0] or 0) >= 6:
+                return
+            conn.execute(text(
+                "ALTER TABLE invoice MODIFY COLUMN finalized_at DATETIME(6) NULL"
+            ))
+    except Exception:
+        return
+
+
 def _allow_mixed_payment_mode() -> None:
     """MySQL stores payment_mode as an ENUM. SQLite stores it as text."""
     if engine.dialect.name != "mysql":
@@ -101,6 +121,7 @@ def _ensure_schema() -> None:
     add_column("credit_note", "refund_amount", "refund_amount NUMERIC(14, 2) NOT NULL DEFAULT 0")
     add_column("credit_note", "refund_mode", "refund_mode VARCHAR(20)")
     _allow_mixed_payment_mode()
+    _invoice_timestamp_precision()
     add_index("customer", "ix_customer_aadhaar_no", "aadhaar_no")
     add_index("customer", "ix_customer_name", "name")
     add_index("customer", "ix_customer_org_name", "organization_id, name")

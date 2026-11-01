@@ -99,6 +99,10 @@ def _to_input(payload: InvoiceCreate) -> billing.InvoiceInput:
             [(t.mode, t.amount) for t in payload.tenders]
             if payload.tenders is not None else None
         ),
+        khata_settlement=(
+            [(t.mode, t.amount) for t in payload.khata_settlement]
+            if payload.khata_settlement is not None else None
+        ),
         client_uuid=payload.client_uuid,
         lines=[
             billing.LineInput(
@@ -120,11 +124,12 @@ def create_invoice(
     db: Session = Depends(get_db),
 ) -> Invoice:
     current.assert_branch_access(payload.branch_id)
+    data = _to_input(payload)
     try:
         invoice = billing.create_and_finalize(
             db,
             organization_id=current.organization_id,
-            data=_to_input(payload),
+            data=data,
             created_by_user_id=current.id,
         )
     except InsufficientStock as exc:
@@ -132,17 +137,25 @@ def create_invoice(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    changes = {"grand_total": str(invoice.grand_total)}
+    if data.khata_collected:
+        changes["khata_collected"] = str(data.khata_collected)
     record_audit(
         db, action="create", entity_type="invoice", entity_id=invoice.id,
         actor_user_id=current.id, organization_id=current.organization_id,
-        branch_id=invoice.branch_id, changes={"grand_total": str(invoice.grand_total)},
+        branch_id=invoice.branch_id, changes=changes,
     )
+    collected = data.khata_collected
+    balance = data.khata_balance
     db.commit()
     db.refresh(invoice)
     invoice = db.execute(
         select(Invoice).options(*_invoice_load()).where(Invoice.id == invoice.id)
     ).unique().scalar_one()
-    return _invoice_out(invoice)
+    out = _invoice_out(invoice)
+    if collected:
+        out = out.model_copy(update={"khata_collected": collected, "khata_balance": balance})
+    return out
 
 
 @router.get("/invoices", response_model=list[InvoiceOut])

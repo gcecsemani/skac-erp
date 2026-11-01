@@ -5,6 +5,8 @@ import { inr, matchesQuery, num } from "../format";
 import { Badge, BranchSelect, Card, ExportButtons, Field, Loading, Modal, PageHeader, SearchInput, SearchSelect, Table } from "../components/ui";
 import * as V from "../validate";
 
+const STOCK_CAP = 5000;
+
 export default function Stock() {
   const [rows, setRows] = useState<any[] | null>(null);
   const [products, setProducts] = useState<any[]>([]);
@@ -22,17 +24,34 @@ export default function Stock() {
   const [q, setQ] = useState("");
   const [branchId, setBranchId] = useState(0);
   const [expiry, setExpiry] = useState("all");
+  const [capped, setCapped] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [form, setForm] = useState<any>({ branch_id: "", product_id: "", batch_no: "", quantity: "", mfg_date: "", expiry_date: "", purchase_price: "" });
 
-  const load = () => api.stock().then(setRows).catch(() => setRows([]));
+  const reload = () => setReloadKey((n) => n + 1);
   useEffect(() => {
-    load();
-    api.products(undefined, undefined, 80).then(setProducts).catch(() => {});
+    api.products(undefined, undefined, 200).then(setProducts).catch(() => {});
     api.branches().then((b) => { setBranches(b); setForm((f: any) => ({ ...f, branch_id: b[0]?.id || "" })); }).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      api.stock({
+        branchId: branchId || undefined,
+        search: q.trim() || undefined,
+        limit: STOCK_CAP,
+      }).then((data) => {
+        if (cancelled) return;
+        setRows(data);
+        setCapped(data.length >= STOCK_CAP);
+      }).catch(() => { if (!cancelled) setRows([]); });
+    }, q.trim() ? 300 : 0);
+    return () => { cancelled = true; window.clearTimeout(handle); };
+  }, [q, branchId, reloadKey]);
+
   const searchProducts = (query: string) => {
-    api.products(query || undefined, undefined, 40).then(setProducts).catch(() => {});
+    api.products(query || undefined, undefined, 200).then(setProducts).catch(() => {});
   };
 
   const daysTo = (d: string | null) => d ? Math.round((+new Date(d) - Date.now()) / 86400000) : null;
@@ -40,7 +59,7 @@ export default function Stock() {
   const filtered = useMemo(() => {
     return (rows || []).filter((r) => {
       if (branchId && r.branch_id !== branchId) return false;
-      if (!matchesQuery(q, r.product, r.batch_no, r.quantity)) return false;
+      if (!matchesQuery(q, r.product, r.sku, r.batch_no)) return false;
       const d = daysTo(r.expiry_date);
       if (expiry === "expired" && !(d !== null && d < 0)) return false;
       if (expiry === "soon" && !(d !== null && d >= 0 && d <= 30)) return false;
@@ -75,7 +94,7 @@ export default function Stock() {
         mfg_date: form.mfg_date || null, expiry_date: form.expiry_date || null,
         purchase_price: form.purchase_price ? Number(form.purchase_price) : 0,
       });
-      setOpen(false); load();
+      setOpen(false); reload();
     } catch (e: any) { setErr(e.message); }
   };
 
@@ -99,7 +118,7 @@ export default function Stock() {
       />
       <Card>
         <div className="row mb-16" style={{ flexWrap: "wrap", gap: 10 }}>
-          <SearchInput value={q} onChange={setQ} placeholder="Search product or batch…" />
+          <SearchInput value={q} onChange={setQ} placeholder="Search product, SKU, or batch…" />
           <BranchSelect value={branchId} onChange={setBranchId} branches={branches} />
           <select value={expiry} onChange={(e) => setExpiry(e.target.value)} style={{ width: "auto" }}>
             <option value="all">All expiry</option>
@@ -107,6 +126,12 @@ export default function Stock() {
             <option value="expired">Expired</option>
           </select>
         </div>
+        {capped && (
+          <p className="muted" style={{ fontSize: 13, marginTop: -6, marginBottom: 12 }}>
+            Showing the first {STOCK_CAP.toLocaleString("en-IN")} on-hand batches.
+            Search by product, SKU, or batch to look through the rest. Batches with zero quantity are not listed.
+          </p>
+        )}
         <Table
           columns={[
             { key: "product", label: "Product" },
@@ -142,7 +167,7 @@ export default function Stock() {
             ) },
           ]}
           rows={filtered}
-          empty={rows.length ? "No stock matches the filters" : "No stock recorded"}
+          empty={rows.length ? "No on-hand stock matches. Batches with zero quantity are hidden." : "No stock recorded"}
           pageSize={50}
         />
       </Card>
@@ -204,7 +229,7 @@ export default function Stock() {
                   body.correct_batch_no = correctForm.batch_no;
                 }
                 await api.adjustStock(body);
-                setCorrect(null); load();
+                setCorrect(null); reload();
               } catch (e: any) { setCorrectErr(e.message); }
               finally { setCorrecting(false); }
             }} disabled={correcting}>{correcting ? "Saving…" : correctForm.relocate ? "Move qty" : "Remove qty"}</button>
@@ -265,7 +290,7 @@ export default function Stock() {
               setCostSaving(true);
               try {
                 await api.updateBatchCost(costRow.batch_id, Number(costPrice));
-                setCostRow(null); load();
+                setCostRow(null); reload();
               } catch (e: any) { setCostErr(e.message); }
               finally { setCostSaving(false); }
             }}>{costSaving ? "Saving…" : "Save cost"}</button>

@@ -318,9 +318,13 @@ export default function POS() {
       .sort((a, b) => rank(a.code) - rank(b.code));
   }, [bundle]);
   const received = r2(tenderModes.reduce((sum, m) => sum + Math.max(0, Number(tenders[m.code]) || 0), 0));
-  const overReceived = received - totals.grand > 0.009;
-  const paid = overReceived ? totals.grand : received;
-  const due = overReceived ? 0 : r2(totals.grand - paid);
+  const oldKhata = customer && Number(customer.outstanding_balance) > 0.004
+    ? r2(Number(customer.outstanding_balance))
+    : 0;
+  const overReceived = received - r2(totals.grand + oldKhata) > 0.009;
+  const towardBill = r2(Math.min(received, totals.grand));
+  const towardOld = overReceived ? 0 : r2(Math.max(0, received - totals.grand));
+  const due = r2(totals.grand - towardBill);
 
   const snapshot = (): PosDraft => ({
     id: activeId,
@@ -378,7 +382,7 @@ export default function POS() {
   };
 
   const discardHeld = (id: string) => setHeld((cur) => cur.filter((h) => h.id !== id));
-  const projectedKhata = Number(customer?.outstanding_balance || 0) + due;
+  const projectedKhata = r2(Math.max(0, oldKhata + due - towardOld));
   const overLimit = !!customer && Number(customer.credit_limit) > 0 && projectedKhata > Number(customer.credit_limit);
 
   const selectCustomer = (c: any | null) => {
@@ -424,10 +428,25 @@ export default function POS() {
   };
 
   const setTenderAmt = (code: string, value: string) => setTenders((cur) => ({ ...cur, [code]: value }));
-  const fillTender = (code: string | null) => {
+  const fillTender = (code: string | null, includeOld = false) => {
     const next: Record<string, string> = {};
-    if (code) next[code] = String(totals.grand);
+    if (code) next[code] = String(includeOld ? r2(totals.grand + oldKhata) : totals.grand);
     setTenders(next);
+  };
+  const splitReceived = () => {
+    let left = totals.grand;
+    const bill: { mode: string; amount: number }[] = [];
+    const khata: { mode: string; amount: number }[] = [];
+    for (const m of tenderModes) {
+      const amt = r2(Math.max(0, Number(tenders[m.code]) || 0));
+      if (amt <= 0) continue;
+      const toBill = r2(Math.min(amt, left));
+      const extra = r2(amt - toBill);
+      if (toBill > 0) bill.push({ mode: m.code, amount: toBill });
+      if (extra > 0) khata.push({ mode: m.code, amount: extra });
+      left = r2(left - toBill);
+    }
+    return { bill, khata };
   };
 
   const checkout = async () => {
@@ -436,15 +455,22 @@ export default function POS() {
       return;
     }
     if (overReceived) {
-      setMsg({ text: "Amount received cannot be more than the bill total.", ok: false });
+      setMsg({
+        text: oldKhata > 0
+          ? `Amount received cannot be more than this bill plus old khata ${inr(oldKhata)}.`
+          : "Amount received cannot be more than the bill total.",
+        ok: false,
+      });
       return;
     }
     if (!branchId) {
       setMsg({ text: "Select a branch.", ok: false });
       return;
     }
-    if (due > 0 && !customer) {
-      setMsg({ text: "Select a farmer to capture the unpaid balance on khata.", ok: false });
+    if ((due > 0 || towardOld > 0) && !customer) {
+      setMsg({ text: due > 0
+        ? "Select a farmer to capture the unpaid balance on khata."
+        : "Select the farmer whose old khata you are settling.", ok: false });
       return;
     }
     if (due > 0 && customer && !customer.credit_allowed) {
@@ -455,15 +481,14 @@ export default function POS() {
       setMsg({ text: `Balance would exceed ${customer.name}'s khata limit of ${inr(customer.credit_limit)}.`, ok: false });
       return;
     }
-    const parts = tenderModes
-      .map((m) => ({ mode: m.code, amount: r2(Math.max(0, Number(tenders[m.code]) || 0)) }))
-      .filter((p) => p.amount > 0);
-    const payload = {
+    const { bill: parts, khata: khataParts } = splitReceived();
+    const payload: any = {
       branch_id: branchId,
       customer_id: customer?.id ?? null,
       payment_mode: parts.length === 0 ? "credit" : parts.length === 1 ? parts[0].mode : "mixed",
-      amount_paid: r2(paid),
+      amount_paid: r2(towardBill),
       tenders: parts,
+      ...(khataParts.length ? { khata_settlement: khataParts } : {}),
       lines: totals.lines.map((l) => ({
         product_id: l.product_id,
         quantity: l.quantity,
@@ -472,18 +497,24 @@ export default function POS() {
         unit: l.unit,
       })),
     };
+    let settledBalance: number | null = null;
     try {
       if (online) {
         const inv = await api.createInvoice(payload);
+        if (inv.khata_balance != null) settledBalance = Number(inv.khata_balance);
         const bal = r2(Number(inv.grand_total) - Number(inv.amount_paid));
+        const settled = r2(Number(inv.khata_collected) || towardOld);
         setLastInv(inv);
         const paidBits = parts.length
           ? parts.map((p) => `${p.mode} ${inr(p.amount)}`).join(" + ")
           : "all on credit";
+        const oldBit = settled > 0
+          ? ` · old khata ${inr(settled)} settled${inv.khata_balance != null ? `, left ${inr(inv.khata_balance)}` : ""}`
+          : "";
         setMsg({
           text: bal > 0
-            ? `Invoice ${inv.invoice_no} · ${paidBits} · balance ${inr(bal)} on khata`
-            : `Invoice ${inv.invoice_no} finalized — ${paidBits}`,
+            ? `Invoice ${inv.invoice_no} · ${paidBits} · balance ${inr(bal)} on khata${oldBit}`
+            : `Invoice ${inv.invoice_no} finalized — ${paidBits}${oldBit}`,
           ok: true,
         });
         if (openPrint) printThermalReceipt(inv);
@@ -507,7 +538,9 @@ export default function POS() {
         const next = {
           ...customer,
           last_bill_date: today,
-          outstanding_balance: due > 0 ? Number(customer.outstanding_balance || 0) + due : customer.outstanding_balance,
+          outstanding_balance: settledBalance != null
+            ? settledBalance
+            : r2(Math.max(0, Number(customer.outstanding_balance || 0) + due - towardOld)),
         };
         upsertCached("customers", next);
         setFarmerBook((cur) => [next, ...cur.filter((x) => x.id !== next.id)]);
@@ -753,6 +786,7 @@ export default function POS() {
             <label>Received now</label>
             <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
               Leave these blank to put the whole bill on credit (khata). Fill more than one to split the payment.
+              {oldKhata > 0 && <> This farmer already owes {inr(oldKhata)}. Anything above this bill settles that khata now.</>}
             </p>
             <div className="tender-row" style={{ gridTemplateColumns: `repeat(${Math.max(tenderModes.length, 1)}, minmax(0, 1fr))` }}>
               {tenderModes.map((m) => {
@@ -767,8 +801,24 @@ export default function POS() {
                 );
               })}
             </div>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => fillTender(null)}>All on credit</button>
-            {overReceived && <div className="error" style={{ marginTop: 8 }}>Received {inr(received)} is more than the bill total.</div>}
+            <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => fillTender(null)}>All on credit</button>
+              {oldKhata > 0 && (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => fillTender(tenderModes.find((m) => m.code === "cash")?.code || tenderModes[0]?.code || "cash", true)}>
+                  Cash: bill + old khata ({inr(r2(totals.grand + oldKhata))})
+                </button>
+              )}
+            </div>
+            {towardOld > 0 && (
+              <div className="pay-hint" style={{ marginTop: 8 }}>
+                {inr(towardBill)} pays this bill. {inr(towardOld)} settles old khata. Remaining khata {inr(projectedKhata)}.
+              </div>
+            )}
+            {overReceived && (
+              <div className="error" style={{ marginTop: 8 }}>
+                Received {inr(received)} is more than this bill{oldKhata > 0 ? ` plus old khata ${inr(oldKhata)}` : ""}.
+              </div>
+            )}
           </div>
           <div className={`totals-row ${due > 0 ? "balance-due" : ""}`}>
             <span>Balance due</span>
@@ -794,7 +844,7 @@ export default function POS() {
               Hold bill
             </button>
             <button className="btn btn-primary" style={{ flex: 1 }} disabled={lines.length === 0 || !branchId || overReceived} onClick={checkout}>
-              <CheckCircle2 size={18} /> Finalize Invoice
+              <CheckCircle2 size={18} /> {towardOld > 0 ? "Finalize & settle khata" : "Finalize Invoice"}
             </button>
           </div>
           {msg && <div className={msg.ok ? "" : "error"} style={{ marginTop: 12, color: msg.ok ? "var(--brand-600)" : undefined, fontWeight: 600, fontSize: 13 }}>{msg.text}</div>}
